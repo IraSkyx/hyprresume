@@ -32,8 +32,8 @@ fn window_to_entry(w: &TrackedWindow) -> WindowEntry {
         workspace: w.workspace.clone(),
         floating: w.floating,
         fullscreen: w.fullscreen,
-        position: if w.floating { Some(w.position) } else { None },
-        size: if w.floating { Some(w.size) } else { None },
+        position: Some(w.position),
+        size: Some(w.size),
     }
 }
 
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn save_non_floating_excludes_geometry() {
+    fn save_non_floating_includes_geometry() {
         let dir = tempfile::tempdir().unwrap();
         let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
 
@@ -296,8 +296,8 @@ mod tests {
 
         let win = &loaded.windows[0];
         assert!(!win.floating);
-        assert!(win.position.is_none());
-        assert!(win.size.is_none());
+        assert_eq!(win.position, Some((100, 200)));
+        assert_eq!(win.size, Some((800, 600)));
     }
 
     #[test]

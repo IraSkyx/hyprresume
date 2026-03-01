@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(loaded_firefox.launch_cmd, "firefox");
         assert_eq!(loaded_firefox.workspace, "1");
         assert!(!loaded_firefox.floating);
-        assert!(loaded_firefox.position.is_none());
+        assert_eq!(loaded_firefox.position, Some((0, 0)));
 
         let loaded_nautilus = loaded
             .windows
