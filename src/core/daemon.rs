@@ -38,7 +38,7 @@ pub async fn run(config: Config) -> Result<()> {
             Ok(session) => {
                 let engine = RestoreEngine::new(
                     config.general.restore_geometry,
-                    config.general.restore_layout,
+                    config.experimental.restore_layout,
                 );
                 let report = engine.restore(&session, &ctl).await?;
                 if report.failed > 0 {

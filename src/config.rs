@@ -11,6 +11,8 @@ pub struct Config {
     pub rules: RulesConfig,
     #[serde(default)]
     pub overrides: HashMap<String, String>,
+    #[serde(default)]
+    pub experimental: ExperimentalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,10 @@ pub struct GeneralConfig {
     pub per_window_launch: bool,
     #[serde(default = "default_true")]
     pub restore_geometry: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExperimentalConfig {
     #[serde(default)]
     pub restore_layout: bool,
 }
@@ -74,7 +80,6 @@ impl Config {
             restore_on_start: true,
             per_window_launch: true,
             restore_geometry: true,
-            restore_layout: false,
         }
     }
 
@@ -119,6 +124,7 @@ impl Default for Config {
             general: Self::default_general(),
             rules: RulesConfig::default(),
             overrides: HashMap::new(),
+            experimental: ExperimentalConfig::default(),
         }
     }
 }
@@ -134,7 +140,7 @@ mod tests {
         assert!(cfg.general.restore_on_start);
         assert!(cfg.general.per_window_launch);
         assert!(cfg.general.restore_geometry);
-        assert!(!cfg.general.restore_layout);
+        assert!(!cfg.experimental.restore_layout);
         assert!(!cfg.rules.exclude.is_empty());
         assert!(cfg.rules.include.is_empty());
         assert!(cfg.overrides.is_empty());
@@ -198,6 +204,9 @@ include = ["^firefox$"]
 [overrides]
 "app.zen_browser.zen" = "flatpak run app.zen_browser.zen"
 "steam_app_.*" = ""
+
+[experimental]
+restore_layout = true
 "#,
         )
         .unwrap();
@@ -208,6 +217,7 @@ include = ["^firefox$"]
         assert!(!cfg.general.restore_on_start);
         assert!(cfg.general.per_window_launch);
         assert!(!cfg.general.restore_geometry);
+        assert!(cfg.experimental.restore_layout);
         assert_eq!(cfg.rules.exclude.len(), 2);
         assert_eq!(cfg.rules.include.len(), 1);
         assert_eq!(cfg.overrides.len(), 2);
