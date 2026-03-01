@@ -142,7 +142,9 @@ async fn populate_initial_state(
         });
     }
 
-    tracing::info!("populated initial state: {} windows", state.window_count());
+    let count = state.window_count();
+    drop(state);
+    tracing::info!("populated initial state: {count} windows");
     Ok(())
 }
 

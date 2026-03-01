@@ -1,0 +1,15 @@
+[Unit]
+Description=Hyprland session persistence daemon
+Documentation=https://github.com/IraSkyx/hyprresume
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hyprresume -v
+Restart=on-failure
+RestartSec=5
+Slice=session.slice
+
+[Install]
+WantedBy=graphical-session.target

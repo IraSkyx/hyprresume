@@ -1,0 +1,33 @@
+# hyprresume — session persistence for Hyprland
+# Place this file at ~/.config/hypr/hyprresume.toml
+
+[general]
+# Seconds between automatic session snapshots
+save_interval = 120
+
+# Where session files are stored
+session_dir = "~/.local/share/hyprresume"
+
+# Automatically restore the "last" session on daemon start
+restore_on_start = true
+
+# Launch one command per window (true) or one per unique app (false)
+per_window_launch = false
+
+# Restore floating window position and size
+restore_geometry = true
+
+[rules]
+# Regex patterns for window classes to exclude from session tracking
+exclude = [
+    "^xdg-desktop-portal.*",
+    "^org\\.kde\\.polkit.*",
+]
+
+# If set, only track window classes matching these patterns (allowlist)
+# include = []
+
+[overrides]
+# Manual class → launch command mappings (overrides auto-detection)
+# "app.zen_browser.zen" = "flatpak run app.zen_browser.zen"
+# "steam_app_.*" = ""  # empty string = skip this class
