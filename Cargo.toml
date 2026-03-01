@@ -1,0 +1,38 @@
+[package]
+name = "hyprresume"
+version = "0.1.0"
+edition = "2024"
+description = "An event-driven session persistence daemon for Hyprland"
+license = "BSD-3-Clause"
+repository = "https://github.com/IraSkyx/hyprresume"
+keywords = ["hyprland", "wayland", "session", "resume"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+tokio = { version = "1.49", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+signal-hook = "0.4"
+signal-hook-tokio = { version = "0.4", features = ["futures-v0_3"] }
+dirs = "6.0"
+regex = "1.12"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+futures = "0.3"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[dev-dependencies]
+tempfile = "3.26.0"
