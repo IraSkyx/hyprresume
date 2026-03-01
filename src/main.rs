@@ -169,7 +169,7 @@ async fn cmd_restore(cfg: &config::Config, name: Option<&str>) -> Result<()> {
     }
 
     let session = snapshot.load(name)?;
-    let engine = core::restore::RestoreEngine::new(cfg.general.restore_geometry);
+    let engine = core::restore::RestoreEngine::new(cfg.general.restore_geometry, cfg.general.restore_layout);
     let report = engine.restore(&session, &ctl).await?;
 
     println!(
