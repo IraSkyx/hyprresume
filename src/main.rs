@@ -4,4 +4,264 @@ mod ipc;
 mod models;
 mod resolver;
 
-fn main() {}
+#[cfg(test)]
+mod tests;
+
+use anyhow::{Result, bail};
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "hyprresume",
+    version,
+    about = "Session persistence daemon for Hyprland"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Path to config file
+    #[arg(short, long)]
+    config: Option<String>,
+
+    /// Log verbosity: -v (info), -vv (debug), -vvv (trace)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    /// Suppress all output
+    #[arg(short, long)]
+    quiet: bool,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Save current session to disk
+    Save {
+        /// Session name (default: "last")
+        name: Option<String>,
+    },
+    /// Restore a saved session
+    Restore {
+        /// Session name (default: "last")
+        name: Option<String>,
+    },
+    /// List saved sessions
+    List,
+    /// Delete a saved session
+    Delete {
+        /// Session name to delete
+        name: String,
+    },
+    /// Show what command a window class resolves to
+    Resolve {
+        /// Window class to resolve
+        class: String,
+    },
+    /// Show current daemon status
+    Status,
+}
+
+fn init_logging(verbose: u8, quiet: bool) {
+    let level = if quiet {
+        "error"
+    } else {
+        match verbose {
+            0 => "warn",
+            1 => "info",
+            2 => "debug",
+            _ => "trace",
+        }
+    };
+
+    let filter = format!("hyprresume={level}");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
+        )
+        .with_target(false)
+        .init();
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    init_logging(cli.verbose, cli.quiet);
+
+    let cfg = config::Config::load(cli.config.as_deref())?;
+
+    match cli.command {
+        None => {
+            tracing::info!("starting hyprresume daemon v{}", env!("CARGO_PKG_VERSION"));
+            core::daemon::run(cfg).await?;
+        }
+
+        Some(Command::Save { name }) => {
+            cmd_save(&cfg, name.as_deref()).await?;
+        }
+
+        Some(Command::Restore { name }) => {
+            cmd_restore(&cfg, name.as_deref()).await?;
+        }
+
+        Some(Command::List) => {
+            cmd_list(&cfg)?;
+        }
+
+        Some(Command::Delete { name }) => {
+            let snapshot = core::snapshot::SnapshotEngine::new(&cfg)?;
+            snapshot.delete(&name)?;
+            println!("Deleted session '{name}'.");
+        }
+
+        Some(Command::Resolve { class }) => {
+            cmd_resolve(&cfg, &class).await?;
+        }
+
+        Some(Command::Status) => {
+            cmd_status(&cfg).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_save(cfg: &config::Config, name: Option<&str>) -> Result<()> {
+    let name = name.unwrap_or("last");
+    let ctl = ipc::client::HyprCtl::from_env()?;
+    let snapshot = core::snapshot::SnapshotEngine::new(cfg)?;
+    let resolver = resolver::AppResolver::new(cfg);
+    let mut state = core::state::StateManager::new(cfg);
+
+    let clients = ctl.get_clients().await?;
+    for c in clients {
+        if !state.should_track(&c.class) {
+            continue;
+        }
+        let launch_cmd = resolver.resolve(&c.class, c.pid).unwrap_or_default();
+        state.add(models::TrackedWindow {
+            address: c.address,
+            app_id: c.class,
+            launch_cmd,
+            workspace: c.workspace.name,
+            position: c.at,
+            size: c.size,
+            floating: c.floating,
+            fullscreen: c.fullscreen_mode > 0,
+        });
+    }
+
+    let path = snapshot.save(&state, name)?;
+    println!("Session '{name}' saved to {}", path.display());
+    Ok(())
+}
+
+async fn cmd_restore(cfg: &config::Config, name: Option<&str>) -> Result<()> {
+    let name = name.unwrap_or("last");
+    let ctl = ipc::client::HyprCtl::from_env()?;
+    let snapshot = core::snapshot::SnapshotEngine::new(cfg)?;
+
+    if !snapshot.exists(name) {
+        bail!(
+            "session '{name}' not found in {}",
+            snapshot.session_dir().display()
+        );
+    }
+
+    let session = snapshot.load(name)?;
+    let engine = core::restore::RestoreEngine::new(cfg.general.restore_geometry);
+    let report = engine.restore(&session, &ctl).await?;
+
+    println!(
+        "Restored {}/{} apps{}",
+        report.restored,
+        report.restored + report.failed,
+        if report.failed > 0 {
+            format!(" ({} failed)", report.failed)
+        } else {
+            String::new()
+        }
+    );
+    for (app, err) in &report.errors {
+        eprintln!("  {app}: {err}");
+    }
+    Ok(())
+}
+
+fn cmd_list(cfg: &config::Config) -> Result<()> {
+    let snapshot = core::snapshot::SnapshotEngine::new(cfg)?;
+    let sessions = snapshot.list()?;
+
+    if sessions.is_empty() {
+        println!("No saved sessions.");
+    } else {
+        println!("{:<20} {:<24} ", "NAME", "SAVED AT");
+        for (name, ts) in sessions {
+            let dt = chrono::DateTime::from_timestamp(ts, 0).map_or_else(
+                || "unknown".to_string(),
+                |d| d.format("%Y-%m-%d %H:%M:%S").to_string(),
+            );
+            println!("{name:<20} {dt:<24}");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_resolve(cfg: &config::Config, class: &str) -> Result<()> {
+    let resolver = resolver::AppResolver::new(cfg);
+
+    let pid = match ipc::client::HyprCtl::from_env() {
+        Ok(ctl) => ctl.get_clients().await.map_or(-1, |clients| {
+            clients
+                .iter()
+                .find(|c| c.class == class)
+                .map_or(-1, |c| c.pid)
+        }),
+        Err(_) => -1,
+    };
+
+    if let Some(cmd) = resolver.resolve(class, pid) {
+        println!("{class} → {cmd}");
+    } else {
+        eprintln!("Could not resolve '{class}' to a launch command");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn cmd_status(cfg: &config::Config) -> Result<()> {
+    let ctl = ipc::client::HyprCtl::from_env()?;
+    match ctl.get_clients().await {
+        Ok(clients) => {
+            println!("Hyprland is running ({} windows)", clients.len());
+        }
+        Err(e) => {
+            eprintln!("Cannot connect to Hyprland: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    let snapshot = core::snapshot::SnapshotEngine::new(cfg)?;
+    if snapshot.exists("last") {
+        match snapshot.load("last") {
+            Ok(session) => {
+                let dt = chrono::DateTime::from_timestamp(session.session.timestamp, 0)
+                    .map_or_else(
+                        || "unknown".to_string(),
+                        |d| d.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    );
+                println!(
+                    "Last session: {} apps, saved at {dt}",
+                    session.windows.len()
+                );
+            }
+            Err(e) => println!("Last session: error reading ({e})"),
+        }
+    } else {
+        println!("No saved session.");
+    }
+
+    println!("Session dir: {}", snapshot.session_dir().display());
+    println!("Config: {}", config::Config::default_path().display());
+    Ok(())
+}
