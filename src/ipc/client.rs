@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -85,15 +85,6 @@ impl HyprCtl {
 
     pub async fn dispatch(&self, args: &str) -> Result<String> {
         self.plain(&format!("dispatch {args}")).await
-    }
-
-    pub async fn keyword(&self, args: &str) -> Result<String> {
-        self.plain(&format!("keyword {args}")).await
-    }
-
-    pub async fn exec(&self, cmd: &str) -> Result<()> {
-        self.dispatch(&format!("exec {cmd}")).await?;
-        Ok(())
     }
 
     /// Launch a command with inline window rules (e.g. workspace placement, float).
