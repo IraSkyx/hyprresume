@@ -11,6 +11,13 @@ use crate::models::{HyprEvent, SessionFile, WindowEntry};
 
 const WINDOW_APPEAR_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Flags that force single-instance behavior, preventing separate CWDs.
+const SINGLE_INSTANCE_FLAGS: &[&str] = &[
+    "--gtk-single-instance=true",
+    "--single-instance",
+    "--ozone-platform-hint=auto",
+];
+
 pub struct RestoreEngine {
     restore_geometry: bool,
     restore_layout: bool,
@@ -51,14 +58,17 @@ impl RestoreEngine {
             }
         });
 
+        let mut active_rules = Vec::new();
+
         if self.restore_layout {
-            self.restore_with_layout(session, ctl, &mut event_rx, &mut report)
+            self.restore_with_layout(session, ctl, &mut event_rx, &mut report, &mut active_rules)
                 .await?;
         } else {
-            self.restore_simple(session, ctl, &mut event_rx, &mut report)
+            self.restore_simple(session, ctl, &mut event_rx, &mut report, &mut active_rules)
                 .await?;
         }
 
+        disable_all_rules(ctl, &active_rules).await;
         listener.abort();
 
         tracing::info!(
@@ -76,6 +86,7 @@ impl RestoreEngine {
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
+        active_rules: &mut Vec<String>,
     ) -> Result<()> {
         let total = session.windows.len();
         for (i, window) in session.windows.iter().enumerate() {
@@ -87,7 +98,10 @@ impl RestoreEngine {
                 window.workspace
             );
 
-            match self.restore_window(window, ctl, events).await {
+            match self
+                .restore_window(window, ctl, events, active_rules)
+                .await
+            {
                 Ok(()) => {
                     report.restored += 1;
                     tracing::info!("  restored {}", window.app_id);
@@ -114,19 +128,28 @@ impl RestoreEngine {
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
+        active_rules: &mut Vec<String>,
     ) -> Result<()> {
         let (floating, ws_plans, fallback_windows) = Self::build_layout_plans(session);
 
         let addresses = self
-            .execute_bsp_plans(session, ctl, events, report, &ws_plans)
+            .execute_bsp_plans(session, ctl, events, report, &ws_plans, active_rules)
             .await?;
 
         self.adjust_tiled_sizes(session, ctl, &addresses).await;
         self.apply_fullscreen(session, ctl, &addresses).await?;
 
-        self.restore_indexed(session, ctl, events, report, &fallback_windows, "fallback")
-            .await?;
-        self.restore_indexed(session, ctl, events, report, &floating, "float")
+        self.restore_indexed(
+            session,
+            ctl,
+            events,
+            report,
+            &fallback_windows,
+            "fallback",
+            active_rules,
+        )
+        .await?;
+        self.restore_indexed(session, ctl, events, report, &floating, "float", active_rules)
             .await?;
 
         Ok(())
@@ -180,6 +203,7 @@ impl RestoreEngine {
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
         ws_plans: &HashMap<String, Vec<RestoreStep>>,
+        active_rules: &mut Vec<String>,
     ) -> Result<HashMap<usize, String>> {
         let mut addresses: HashMap<usize, String> = HashMap::new();
         let mut sorted_ws: Vec<&String> = ws_plans.keys().collect();
@@ -206,7 +230,10 @@ impl RestoreEngine {
                         .await?;
                 }
 
-                match self.launch_and_track(window, ctl, events).await {
+                match self
+                    .launch_and_track(window, ctl, events, active_rules)
+                    .await
+                {
                     Ok(Some(addr)) => {
                         addresses.insert(step.window_idx, addr);
                         report.restored += 1;
@@ -272,6 +299,7 @@ impl RestoreEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn restore_indexed(
         &self,
         session: &SessionFile,
@@ -280,6 +308,7 @@ impl RestoreEngine {
         report: &mut RestoreReport,
         indices: &[usize],
         label: &str,
+        active_rules: &mut Vec<String>,
     ) -> Result<()> {
         for &idx in indices {
             let window = &session.windows[idx];
@@ -288,7 +317,10 @@ impl RestoreEngine {
                 window.app_id,
                 window.workspace
             );
-            match self.restore_window(window, ctl, events).await {
+            match self
+                .restore_window(window, ctl, events, active_rules)
+                .await
+            {
                 Ok(()) => report.restored += 1,
                 Err(e) => {
                     report.failed += 1;
@@ -300,12 +332,15 @@ impl RestoreEngine {
     }
 
     /// Launch a window with workspace placement via named rules, wait for it
-    /// to appear, then return its address. Does NOT apply geometry/float.
+    /// to appear, then return its address. Rule cleanup is deferred to the
+    /// caller so forking apps (Electron) keep their workspace rule active
+    /// until the entire restore completes.
     async fn launch_and_track(
         &self,
         window: &WindowEntry,
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
+        active_rules: &mut Vec<String>,
     ) -> Result<Option<String>> {
         let rule_name = format!("hyprresume-{}", window.app_id.replace(['.', ' '], "-"));
         let class_escaped = regex::escape(&window.app_id);
@@ -319,31 +354,17 @@ impl RestoreEngine {
             window.workspace
         ))
         .await?;
+        active_rules.push(rule_name);
 
-        let exec_cmd = window.cwd.as_ref().map_or_else(
-            || format!("exec {}", window.launch_cmd),
-            |cwd| {
-                let escaped = shell_escape(cwd);
-                format!("exec sh -c 'cd {} && exec {}'", escaped, window.launch_cmd)
-            },
-        );
-
-        ctl.dispatch(&exec_cmd)
+        let launch_cmd = build_launch_cmd(window);
+        ctl.dispatch(&format!("exec {launch_cmd}"))
             .await
             .with_context(|| format!("launching {}", window.launch_cmd))?;
 
         let addr = self.wait_for_open_event(events, &window.app_id).await;
 
-        drop(
-            ctl.keyword(&format!("windowrule[{rule_name}]:enable false"))
-                .await,
-        );
-
         if let Some(ref addr) = addr {
             tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
-            // Belt-and-suspenders: explicitly move to the correct workspace.
-            // The named rule handles most cases, but forking apps (Electron)
-            // can open their main window after the rule is disabled.
             drop(
                 ctl.dispatch(&format!(
                     "movetoworkspacesilent {},address:0x{addr}",
@@ -367,8 +388,9 @@ impl RestoreEngine {
         window: &WindowEntry,
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
+        active_rules: &mut Vec<String>,
     ) -> Result<()> {
-        let addr = self.launch_and_track(window, ctl, events).await?;
+        let addr = self.launch_and_track(window, ctl, events, active_rules).await?;
 
         let Some(addr) = addr else {
             return Ok(());
@@ -415,8 +437,41 @@ impl RestoreEngine {
     }
 }
 
+/// Build the exec command, stripping single-instance flags when a CWD
+/// needs to be restored (otherwise the second instance just delegates
+/// to the first, ignoring our CWD wrapper).
+fn build_launch_cmd(window: &WindowEntry) -> String {
+    window.cwd.as_ref().map_or_else(
+        || window.launch_cmd.clone(),
+        |cwd| {
+            let clean_cmd = strip_single_instance_flags(&window.launch_cmd);
+            let escaped = shell_escape(cwd);
+            format!("sh -c 'cd {escaped} && exec {clean_cmd}'")
+        },
+    )
+}
+
+fn strip_single_instance_flags(cmd: &str) -> String {
+    cmd.split_whitespace()
+        .filter(|arg| !SINGLE_INSTANCE_FLAGS.contains(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+async fn disable_all_rules(ctl: &HyprCtl, rules: &[String]) {
+    for rule in rules {
+        drop(
+            ctl.keyword(&format!("windowrule[{rule}]:enable false"))
+                .await,
+        );
+    }
+    if !rules.is_empty() {
+        tracing::debug!("disabled {} window rules", rules.len());
+    }
 }
 
 #[derive(Debug, Default)]
