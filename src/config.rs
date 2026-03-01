@@ -14,6 +14,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct GeneralConfig {
     #[serde(default = "default_save_interval")]
     pub save_interval: u64,

@@ -1,7 +1,7 @@
 use crate::models::WindowEntry;
 
 /// A rectangle in screen coordinates.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -10,7 +10,7 @@ pub struct Rect {
 }
 
 /// Binary split direction in the Dwindle BSP tree.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitDir {
     /// Left / Right
     Horizontal,
@@ -18,18 +18,18 @@ pub enum SplitDir {
     Vertical,
 }
 
-/// A node in the inferred BSP tree.
+/// A node in the inferred BSP tree, storing window indices.
 #[derive(Debug)]
 #[allow(dead_code)]
-pub enum BspNode<'a> {
+pub enum BspNode {
     Leaf {
-        window: &'a WindowEntry,
+        idx: usize,
     },
     Split {
         dir: SplitDir,
         ratio: f64,
-        first: Box<BspNode<'a>>,
-        second: Box<BspNode<'a>>,
+        first: Box<Self>,
+        second: Box<Self>,
     },
 }
 
@@ -53,57 +53,67 @@ pub enum PreselDir {
 impl std::fmt::Display for PreselDir {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PreselDir::Right => write!(f, "r"),
-            PreselDir::Bottom => write!(f, "b"),
+            Self::Right => write!(f, "r"),
+            Self::Bottom => write!(f, "b"),
         }
     }
+}
+
+/// An indexed window: pairs a global index with position/size data.
+#[derive(Clone)]
+struct IndexedWindow {
+    idx: usize,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+fn extract_indexed(windows: &[&WindowEntry], global_indices: &[usize]) -> Option<Vec<IndexedWindow>> {
+    windows
+        .iter()
+        .zip(global_indices)
+        .map(|(w, &idx)| {
+            let (x, y) = w.position?;
+            let (ww, hh) = w.size?;
+            Some(IndexedWindow {
+                idx,
+                x,
+                y,
+                w: ww,
+                h: hh,
+            })
+        })
+        .collect()
 }
 
 /// Infer a BSP tree from a set of tiled windows based on their geometry.
 ///
 /// Returns `None` if the windows can't form a valid BSP partition
 /// (e.g. overlapping, gaps, or missing geometry).
-pub fn infer_bsp<'a>(windows: &[&'a WindowEntry], bounds: Rect) -> Option<BspNode<'a>> {
-    if windows.is_empty() {
+fn infer_bsp(indexed: &[IndexedWindow], bounds: Rect) -> Option<BspNode> {
+    if indexed.is_empty() {
         return None;
     }
-    if windows.len() == 1 {
-        return Some(BspNode::Leaf {
-            window: windows[0],
-        });
+    if indexed.len() == 1 {
+        return Some(BspNode::Leaf { idx: indexed[0].idx });
     }
 
-    // Collect all interior vertical edges (potential vertical split lines).
-    // A valid split line at `sx` means every window is entirely left or right of it.
-    if let Some(node) = try_split(windows, bounds, SplitDir::Horizontal) {
-        return Some(node);
-    }
-    if let Some(node) = try_split(windows, bounds, SplitDir::Vertical) {
-        return Some(node);
-    }
-
-    None
+    try_split(indexed, bounds, SplitDir::Horizontal)
+        .or_else(|| try_split(indexed, bounds, SplitDir::Vertical))
 }
 
-fn try_split<'a>(
-    windows: &[&'a WindowEntry],
-    bounds: Rect,
-    dir: SplitDir,
-) -> Option<BspNode<'a>> {
-    // Collect candidate split positions from window edges
+fn try_split(indexed: &[IndexedWindow], bounds: Rect, dir: SplitDir) -> Option<BspNode> {
     let mut candidates: Vec<i32> = Vec::new();
-    for w in windows {
-        let (Some((x, y)), Some((ww, hh))) = (w.position, w.size) else {
-            return None;
-        };
+    for iw in indexed {
         match dir {
             SplitDir::Horizontal => {
-                candidates.push(x);
-                candidates.push(x + ww);
+                candidates.push(iw.x);
+                candidates.push(iw.x + iw.w);
             }
             SplitDir::Vertical => {
-                candidates.push(y);
-                candidates.push(y + hh);
+                candidates.push(iw.y);
+                candidates.push(iw.y + iw.h);
             }
         }
     }
@@ -111,99 +121,107 @@ fn try_split<'a>(
     candidates.dedup();
 
     for &split_at in &candidates {
-        let (range_start, range_end) = match dir {
-            SplitDir::Horizontal => (bounds.x, bounds.x + bounds.w),
-            SplitDir::Vertical => (bounds.y, bounds.y + bounds.h),
-        };
-
-        // Split must be interior to bounds
-        if split_at <= range_start || split_at >= range_end {
-            continue;
-        }
-
-        let (mut first_group, mut second_group): (Vec<&WindowEntry>, Vec<&WindowEntry>) =
-            (Vec::new(), Vec::new());
-        let mut valid = true;
-
-        for w in windows {
-            let (Some((x, y)), Some((ww, hh))) = (w.position, w.size) else {
-                valid = false;
-                break;
-            };
-            let (start, end) = match dir {
-                SplitDir::Horizontal => (x, x + ww),
-                SplitDir::Vertical => (y, y + hh),
-            };
-
-            if end <= split_at {
-                first_group.push(w);
-            } else if start >= split_at {
-                second_group.push(w);
-            } else {
-                valid = false;
-                break;
-            }
-        }
-
-        if !valid || first_group.is_empty() || second_group.is_empty() {
-            continue;
-        }
-
-        let (first_bounds, second_bounds) = match dir {
-            SplitDir::Horizontal => (
-                Rect {
-                    x: bounds.x,
-                    y: bounds.y,
-                    w: split_at - bounds.x,
-                    h: bounds.h,
-                },
-                Rect {
-                    x: split_at,
-                    y: bounds.y,
-                    w: bounds.x + bounds.w - split_at,
-                    h: bounds.h,
-                },
-            ),
-            SplitDir::Vertical => (
-                Rect {
-                    x: bounds.x,
-                    y: bounds.y,
-                    w: bounds.w,
-                    h: split_at - bounds.y,
-                },
-                Rect {
-                    x: bounds.x,
-                    y: split_at,
-                    w: bounds.w,
-                    h: bounds.y + bounds.h - split_at,
-                },
-            ),
-        };
-
-        if let (Some(first_node), Some(second_node)) = (
-            infer_bsp(&first_group, first_bounds),
-            infer_bsp(&second_group, second_bounds),
-        ) {
-            let total = match dir {
-                SplitDir::Horizontal => bounds.w as f64,
-                SplitDir::Vertical => bounds.h as f64,
-            };
-            let first_size = match dir {
-                SplitDir::Horizontal => first_bounds.w as f64,
-                SplitDir::Vertical => first_bounds.h as f64,
-            };
-            let ratio = first_size / total;
-
-            return Some(BspNode::Split {
-                dir,
-                ratio,
-                first: Box::new(first_node),
-                second: Box::new(second_node),
-            });
+        if let Some(node) = try_split_at(indexed, bounds, dir, split_at) {
+            return Some(node);
         }
     }
 
     None
+}
+
+fn try_split_at(
+    indexed: &[IndexedWindow],
+    bounds: Rect,
+    dir: SplitDir,
+    split_at: i32,
+) -> Option<BspNode> {
+    let (range_start, range_end) = match dir {
+        SplitDir::Horizontal => (bounds.x, bounds.x + bounds.w),
+        SplitDir::Vertical => (bounds.y, bounds.y + bounds.h),
+    };
+
+    if split_at <= range_start || split_at >= range_end {
+        return None;
+    }
+
+    let mut first_group: Vec<&IndexedWindow> = Vec::new();
+    let mut second_group: Vec<&IndexedWindow> = Vec::new();
+
+    for iw in indexed {
+        let (start, end) = match dir {
+            SplitDir::Horizontal => (iw.x, iw.x + iw.w),
+            SplitDir::Vertical => (iw.y, iw.y + iw.h),
+        };
+
+        if end <= split_at {
+            first_group.push(iw);
+        } else if start >= split_at {
+            second_group.push(iw);
+        } else {
+            return None;
+        }
+    }
+
+    if first_group.is_empty() || second_group.is_empty() {
+        return None;
+    }
+
+    let (first_bounds, second_bounds) = split_bounds(bounds, dir, split_at);
+
+    let first_owned: Vec<IndexedWindow> = first_group.iter().map(|iw| (**iw).clone()).collect();
+    let second_owned: Vec<IndexedWindow> = second_group.iter().map(|iw| (**iw).clone()).collect();
+
+    let first_node = infer_bsp(&first_owned, first_bounds)?;
+    let second_node = infer_bsp(&second_owned, second_bounds)?;
+
+    let total = match dir {
+        SplitDir::Horizontal => f64::from(bounds.w),
+        SplitDir::Vertical => f64::from(bounds.h),
+    };
+    let first_size = match dir {
+        SplitDir::Horizontal => f64::from(first_bounds.w),
+        SplitDir::Vertical => f64::from(first_bounds.h),
+    };
+
+    Some(BspNode::Split {
+        dir,
+        ratio: first_size / total,
+        first: Box::new(first_node),
+        second: Box::new(second_node),
+    })
+}
+
+const fn split_bounds(bounds: Rect, dir: SplitDir, split_at: i32) -> (Rect, Rect) {
+    match dir {
+        SplitDir::Horizontal => (
+            Rect {
+                x: bounds.x,
+                y: bounds.y,
+                w: split_at - bounds.x,
+                h: bounds.h,
+            },
+            Rect {
+                x: split_at,
+                y: bounds.y,
+                w: bounds.x + bounds.w - split_at,
+                h: bounds.h,
+            },
+        ),
+        SplitDir::Vertical => (
+            Rect {
+                x: bounds.x,
+                y: bounds.y,
+                w: bounds.w,
+                h: split_at - bounds.y,
+            },
+            Rect {
+                x: bounds.x,
+                y: split_at,
+                w: bounds.w,
+                h: bounds.y + bounds.h - split_at,
+            },
+        ),
+    }
 }
 
 /// Compute the bounding rectangle of a set of windows.
@@ -214,9 +232,8 @@ pub fn bounding_rect(windows: &[&WindowEntry]) -> Option<Rect> {
     let mut max_y = i32::MIN;
 
     for w in windows {
-        let (Some((x, y)), Some((ww, hh))) = (w.position, w.size) else {
-            return None;
-        };
+        let (x, y) = w.position?;
+        let (ww, hh) = w.size?;
         min_x = min_x.min(x);
         min_y = min_y.min(y);
         max_x = max_x.max(x + ww);
@@ -236,101 +253,69 @@ pub fn bounding_rect(windows: &[&WindowEntry]) -> Option<Rect> {
 }
 
 /// Convert a BSP tree into an ordered list of restore steps.
-///
-/// `window_index` maps each `WindowEntry` pointer to its index in the
-/// original session windows list so restore can look them up.
-pub fn plan_from_bsp(
-    tree: &BspNode<'_>,
-    window_index: &std::collections::HashMap<*const WindowEntry, usize>,
-) -> Vec<RestoreStep> {
+pub fn plan_from_bsp(tree: &BspNode) -> Vec<RestoreStep> {
     let mut steps = Vec::new();
-    walk_bsp(tree, None, None, window_index, &mut steps);
-
-    // Compute resize deltas: compare saved size vs default 50/50 split sizes.
-    // We do this after all steps are generated so we know the expected
-    // default sizes. For now, we skip resize — Hyprland's preselect + open
-    // gets the tree structure right, and resizewindowpixel adjustments
-    // can be applied as a post-pass.
+    walk_bsp(tree, None, None, &mut steps);
     steps
 }
 
 fn walk_bsp(
-    node: &BspNode<'_>,
+    node: &BspNode,
     focus_idx: Option<usize>,
     preselect: Option<PreselDir>,
-    window_index: &std::collections::HashMap<*const WindowEntry, usize>,
     steps: &mut Vec<RestoreStep>,
 ) {
     match node {
-        BspNode::Leaf { window } => {
-            let idx = window_index[&(*window as *const WindowEntry)];
+        BspNode::Leaf { idx } => {
             steps.push(RestoreStep {
-                window_idx: idx,
+                window_idx: *idx,
                 focus_idx,
                 preselect,
             });
         }
         BspNode::Split {
-            dir,
-            first,
-            second,
-            ..
+            dir, first, second, ..
         } => {
-            // Open the entire first subtree (inherits our focus/preselect context)
-            walk_bsp(first, focus_idx, preselect, window_index, steps);
+            walk_bsp(first, focus_idx, preselect, steps);
 
-            // For the second subtree: focus the first subtree's leftmost leaf,
-            // preselect the appropriate direction, then open the second subtree.
-            let first_leaf_idx = leftmost_leaf_idx(first, window_index);
+            let first_leaf = leftmost_leaf_idx(first);
             let presel = match dir {
                 SplitDir::Horizontal => PreselDir::Right,
                 SplitDir::Vertical => PreselDir::Bottom,
             };
-            walk_bsp(
-                second,
-                Some(first_leaf_idx),
-                Some(presel),
-                window_index,
-                steps,
-            );
+            walk_bsp(second, Some(first_leaf), Some(presel), steps);
         }
     }
 }
 
-fn leftmost_leaf_idx(
-    node: &BspNode<'_>,
-    window_index: &std::collections::HashMap<*const WindowEntry, usize>,
-) -> usize {
+fn leftmost_leaf_idx(node: &BspNode) -> usize {
     match node {
-        BspNode::Leaf { window } => window_index[&(*window as *const WindowEntry)],
-        BspNode::Split { first, .. } => leftmost_leaf_idx(first, window_index),
+        BspNode::Leaf { idx } => *idx,
+        BspNode::Split { first, .. } => leftmost_leaf_idx(first),
     }
 }
 
 /// Build a restore plan for a set of tiled windows on a single workspace.
 ///
+/// `global_indices` maps each window in `windows` to its index in the full
+/// session window list.
+///
 /// Returns `None` if BSP inference fails (falls back to simple restore).
 pub fn build_workspace_plan(
     windows: &[&WindowEntry],
-    window_index: &std::collections::HashMap<*const WindowEntry, usize>,
+    global_indices: &[usize],
 ) -> Option<Vec<RestoreStep>> {
     let bounds = bounding_rect(windows)?;
-    let tree = infer_bsp(windows, bounds)?;
-    Some(plan_from_bsp(&tree, window_index))
+    let indexed = extract_indexed(windows, global_indices)?;
+    let tree = infer_bsp(&indexed, bounds)?;
+    Some(plan_from_bsp(&tree))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_entry(
-        app_id: &str,
-        ws: &str,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-    ) -> WindowEntry {
+    fn make_entry(app_id: &str, ws: &str, x: i32, y: i32, w: i32, h: i32) -> WindowEntry {
         WindowEntry {
             app_id: app_id.to_string(),
             launch_cmd: app_id.to_string(),
@@ -347,43 +332,44 @@ mod tests {
         let w = make_entry("firefox", "1", 0, 0, 1920, 1080);
         let refs = vec![&w];
         let bounds = bounding_rect(&refs).unwrap();
-        let tree = infer_bsp(&refs, bounds).unwrap();
+        let indexed = extract_indexed(&refs, &[0]).unwrap();
+        let tree = infer_bsp(&indexed, bounds).unwrap();
         assert!(matches!(tree, BspNode::Leaf { .. }));
     }
 
     #[test]
     fn two_windows_horizontal_split() {
-        // Left half and right half
         let a = make_entry("firefox", "1", 0, 0, 960, 1080);
         let b = make_entry("code", "1", 960, 0, 960, 1080);
         let refs = vec![&a, &b];
         let bounds = bounding_rect(&refs).unwrap();
-        let tree = infer_bsp(&refs, bounds).unwrap();
+        let indexed = extract_indexed(&refs, &[0, 1]).unwrap();
+        let tree = infer_bsp(&indexed, bounds).unwrap();
 
         match &tree {
             BspNode::Split { dir, ratio, .. } => {
                 assert_eq!(*dir, SplitDir::Horizontal);
                 assert!((ratio - 0.5).abs() < 0.01);
             }
-            _ => panic!("expected split"),
+            BspNode::Leaf { .. } => panic!("expected split"),
         }
     }
 
     #[test]
     fn two_windows_vertical_split() {
-        // Top half and bottom half
         let a = make_entry("firefox", "1", 0, 0, 1920, 540);
         let b = make_entry("code", "1", 0, 540, 1920, 540);
         let refs = vec![&a, &b];
         let bounds = bounding_rect(&refs).unwrap();
-        let tree = infer_bsp(&refs, bounds).unwrap();
+        let indexed = extract_indexed(&refs, &[0, 1]).unwrap();
+        let tree = infer_bsp(&indexed, bounds).unwrap();
 
         match &tree {
             BspNode::Split { dir, ratio, .. } => {
                 assert_eq!(*dir, SplitDir::Vertical);
                 assert!((ratio - 0.5).abs() < 0.01);
             }
-            _ => panic!("expected split"),
+            BspNode::Leaf { .. } => panic!("expected split"),
         }
     }
 
@@ -400,7 +386,8 @@ mod tests {
 
         let refs = vec![&a, &b, &c];
         let bounds = bounding_rect(&refs).unwrap();
-        let tree = infer_bsp(&refs, bounds).unwrap();
+        let indexed = extract_indexed(&refs, &[0, 1, 2]).unwrap();
+        let tree = infer_bsp(&indexed, bounds).unwrap();
 
         match &tree {
             BspNode::Split {
@@ -428,44 +415,34 @@ mod tests {
         let b = make_entry("b", "1", 960, 0, 960, 540);
         let c = make_entry("c", "1", 960, 540, 960, 540);
 
-        let all = vec![a.clone(), b.clone(), c.clone()];
-        let refs: Vec<&WindowEntry> = all.iter().collect();
-
-        let mut idx_map = std::collections::HashMap::new();
-        for (i, w) in refs.iter().enumerate() {
-            idx_map.insert(*w as *const WindowEntry, i);
-        }
-
-        let steps = build_workspace_plan(&refs, &idx_map).unwrap();
+        let refs: Vec<&WindowEntry> = vec![&a, &b, &c];
+        let steps = build_workspace_plan(&refs, &[0, 1, 2]).unwrap();
         assert_eq!(steps.len(), 3);
 
-        // First window: no focus, no preselect
         assert!(steps[0].focus_idx.is_none());
         assert!(steps[0].preselect.is_none());
 
-        // Second window: focus first, preselect right
         assert!(steps[1].focus_idx.is_some());
         assert!(matches!(steps[1].preselect, Some(PreselDir::Right)));
 
-        // Third window: focus second (b), preselect bottom
         assert!(steps[2].focus_idx.is_some());
         assert!(matches!(steps[2].preselect, Some(PreselDir::Bottom)));
     }
 
     #[test]
     fn uneven_ratio() {
-        // 60/40 split
         let a = make_entry("a", "1", 0, 0, 1152, 1080);
         let b = make_entry("b", "1", 1152, 0, 768, 1080);
         let refs = vec![&a, &b];
         let bounds = bounding_rect(&refs).unwrap();
-        let tree = infer_bsp(&refs, bounds).unwrap();
+        let indexed = extract_indexed(&refs, &[0, 1]).unwrap();
+        let tree = infer_bsp(&indexed, bounds).unwrap();
 
         match &tree {
             BspNode::Split { ratio, .. } => {
                 assert!((ratio - 0.6).abs() < 0.01);
             }
-            _ => panic!("expected split"),
+            BspNode::Leaf { .. } => panic!("expected split"),
         }
     }
 

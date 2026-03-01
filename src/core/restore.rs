@@ -115,13 +115,26 @@ impl RestoreEngine {
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
     ) -> Result<()> {
-        // Build pointer-to-index map for the layout planner
-        let mut window_index: HashMap<*const WindowEntry, usize> = HashMap::new();
-        for (i, w) in session.windows.iter().enumerate() {
-            window_index.insert(w as *const WindowEntry, i);
-        }
+        let (floating, ws_plans, fallback_windows) = Self::build_layout_plans(session);
 
-        // Separate floating and tiled windows
+        let addresses = self
+            .execute_bsp_plans(session, ctl, events, report, &ws_plans)
+            .await?;
+
+        self.adjust_tiled_sizes(session, ctl, &addresses).await;
+        self.apply_fullscreen(session, ctl, &addresses).await?;
+
+        self.restore_indexed(session, ctl, events, report, &fallback_windows, "fallback")
+            .await?;
+        self.restore_indexed(session, ctl, events, report, &floating, "float")
+            .await?;
+
+        Ok(())
+    }
+
+    fn build_layout_plans(
+        session: &SessionFile,
+    ) -> (Vec<usize>, HashMap<String, Vec<RestoreStep>>, Vec<usize>) {
         let floating: Vec<usize> = session
             .windows
             .iter()
@@ -130,49 +143,50 @@ impl RestoreEngine {
             .map(|(i, _)| i)
             .collect();
 
-        // Group tiled windows by workspace
-        let mut ws_groups: HashMap<&str, Vec<&WindowEntry>> = HashMap::new();
-        for w in session.windows.iter().filter(|w| !w.floating) {
-            ws_groups
-                .entry(&w.workspace)
-                .or_default()
-                .push(w);
-        }
-
-        // For each workspace, try to build a BSP plan
-        let mut ws_plans: HashMap<&str, Vec<RestoreStep>> = HashMap::new();
-        let mut fallback_windows: Vec<usize> = Vec::new();
-
-        for (ws, wins) in &ws_groups {
-            match layout::build_workspace_plan(wins, &window_index) {
-                Some(plan) => {
-                    tracing::info!(
-                        "workspace {ws}: inferred BSP layout for {} windows",
-                        wins.len()
-                    );
-                    ws_plans.insert(ws, plan);
-                }
-                None => {
-                    tracing::warn!(
-                        "workspace {ws}: could not infer BSP layout, falling back to simple restore"
-                    );
-                    for w in wins {
-                        fallback_windows.push(window_index[&(*w as *const WindowEntry)]);
-                    }
-                }
+        let mut ws_groups: HashMap<&str, (Vec<&WindowEntry>, Vec<usize>)> = HashMap::new();
+        for (i, w) in session.windows.iter().enumerate() {
+            if !w.floating {
+                let entry = ws_groups.entry(&w.workspace).or_default();
+                entry.0.push(w);
+                entry.1.push(i);
             }
         }
 
-        // Track address of each opened window by its index
-        let mut addresses: HashMap<usize, String> = HashMap::new();
+        let mut ws_plans: HashMap<String, Vec<RestoreStep>> = HashMap::new();
+        let mut fallback_windows: Vec<usize> = Vec::new();
 
-        // Restore tiled windows per workspace in BSP order
-        // Sort workspaces for deterministic order
-        let mut sorted_ws: Vec<&&str> = ws_plans.keys().collect();
+        for (ws, (wins, indices)) in &ws_groups {
+            if let Some(plan) = layout::build_workspace_plan(wins, indices) {
+                tracing::info!(
+                    "workspace {ws}: inferred BSP layout for {} windows",
+                    wins.len()
+                );
+                ws_plans.insert((*ws).to_string(), plan);
+            } else {
+                tracing::warn!(
+                    "workspace {ws}: could not infer BSP layout, falling back to simple restore"
+                );
+                fallback_windows.extend_from_slice(indices);
+            }
+        }
+
+        (floating, ws_plans, fallback_windows)
+    }
+
+    async fn execute_bsp_plans(
+        &self,
+        session: &SessionFile,
+        ctl: &HyprCtl,
+        events: &mut mpsc::Receiver<HyprEvent>,
+        report: &mut RestoreReport,
+        ws_plans: &HashMap<String, Vec<RestoreStep>>,
+    ) -> Result<HashMap<usize, String>> {
+        let mut addresses: HashMap<usize, String> = HashMap::new();
+        let mut sorted_ws: Vec<&String> = ws_plans.keys().collect();
         sorted_ws.sort();
 
         for ws in sorted_ws {
-            let plan = &ws_plans[*ws];
+            let plan = &ws_plans[ws];
             for step in plan {
                 let window = &session.windows[step.window_idx];
                 tracing::info!(
@@ -183,7 +197,6 @@ impl RestoreEngine {
                     step.preselect,
                 );
 
-                // Focus the sibling window and preselect before opening
                 if let (Some(focus_idx), Some(presel)) = (step.focus_idx, step.preselect)
                     && let Some(focus_addr) = addresses.get(&focus_idx)
                 {
@@ -212,10 +225,16 @@ impl RestoreEngine {
             }
         }
 
-        // Resize tiled windows to match saved ratios.
-        // After BSP reconstruction with default 50/50 splits, query each
-        // window's actual size and apply deltas to match the saved size.
-        for (idx, addr) in &addresses {
+        Ok(addresses)
+    }
+
+    async fn adjust_tiled_sizes(
+        &self,
+        session: &SessionFile,
+        ctl: &HyprCtl,
+        addresses: &HashMap<usize, String>,
+    ) {
+        for (idx, addr) in addresses {
             let window = &session.windows[*idx];
             if let Some((saved_w, saved_h)) = window.size
                 && let Ok(Some(client)) = ctl.get_client_by_address(addr).await
@@ -228,60 +247,55 @@ impl RestoreEngine {
                         "  resizing {} by ({dx}, {dy}) to match saved layout",
                         window.app_id
                     );
-                    let _ = ctl
-                        .dispatch(&format!("resizewindowpixel {dx} {dy},address:0x{addr}"))
-                        .await;
+                    drop(
+                        ctl.dispatch(&format!("resizewindowpixel {dx} {dy},address:0x{addr}"))
+                            .await,
+                    );
                 }
             }
         }
+    }
 
-        // Restore fullscreen state for tiled windows
-        for (idx, addr) in &addresses {
+    async fn apply_fullscreen(
+        &self,
+        session: &SessionFile,
+        ctl: &HyprCtl,
+        addresses: &HashMap<usize, String>,
+    ) -> Result<()> {
+        for (idx, addr) in addresses {
             let window = &session.windows[*idx];
             if window.fullscreen {
                 ctl.dispatch(&format!("fullscreen 0,address:0x{addr}"))
                     .await?;
             }
         }
+        Ok(())
+    }
 
-        // Restore fallback tiled windows (BSP inference failed for their workspace)
-        for idx in &fallback_windows {
-            let window = &session.windows[*idx];
+    async fn restore_indexed(
+        &self,
+        session: &SessionFile,
+        ctl: &HyprCtl,
+        events: &mut mpsc::Receiver<HyprEvent>,
+        report: &mut RestoreReport,
+        indices: &[usize],
+        label: &str,
+    ) -> Result<()> {
+        for &idx in indices {
+            let window = &session.windows[idx];
             tracing::info!(
-                "[fallback] restoring {} on workspace {}",
+                "[{label}] restoring {} on workspace {}",
                 window.app_id,
                 window.workspace
             );
             match self.restore_window(window, ctl, events).await {
-                Ok(()) => {
-                    report.restored += 1;
-                }
+                Ok(()) => report.restored += 1,
                 Err(e) => {
                     report.failed += 1;
                     report.errors.push((window.app_id.clone(), e.to_string()));
                 }
             }
         }
-
-        // Restore floating windows
-        for idx in &floating {
-            let window = &session.windows[*idx];
-            tracing::info!(
-                "[float] restoring {} on workspace {}",
-                window.app_id,
-                window.workspace
-            );
-            match self.restore_window(window, ctl, events).await {
-                Ok(()) => {
-                    report.restored += 1;
-                }
-                Err(e) => {
-                    report.failed += 1;
-                    report.errors.push((window.app_id.clone(), e.to_string()));
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -293,10 +307,7 @@ impl RestoreEngine {
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
     ) -> Result<Option<String>> {
-        let rule_name = format!(
-            "hyprresume-{}",
-            window.app_id.replace(['.', ' '], "-")
-        );
+        let rule_name = format!("hyprresume-{}", window.app_id.replace(['.', ' '], "-"));
         let class_escaped = regex::escape(&window.app_id);
 
         ctl.keyword(&format!(
@@ -351,14 +362,10 @@ impl RestoreEngine {
             {
                 ctl.dispatch(&format!("setfloating address:0x{addr}"))
                     .await?;
-                ctl.dispatch(&format!(
-                    "resizewindowpixel exact {w} {h},address:0x{addr}"
-                ))
-                .await?;
-                ctl.dispatch(&format!(
-                    "movewindowpixel exact {x} {y},address:0x{addr}"
-                ))
-                .await?;
+                ctl.dispatch(&format!("resizewindowpixel exact {w} {h},address:0x{addr}"))
+                    .await?;
+                ctl.dispatch(&format!("movewindowpixel exact {x} {y},address:0x{addr}"))
+                    .await?;
             }
 
             if window.fullscreen {
@@ -376,15 +383,14 @@ impl RestoreEngine {
         app_id: &str,
     ) -> Option<String> {
         tokio::time::timeout(WINDOW_APPEAR_TIMEOUT, async {
-            loop {
-                match events.recv().await {
-                    Some(HyprEvent::OpenWindow { address, class, .. }) if class == app_id => {
-                        return Some(address);
-                    }
-                    Some(_) => continue,
-                    None => return None,
+            while let Some(event) = events.recv().await {
+                if let HyprEvent::OpenWindow { address, class, .. } = event
+                    && class == app_id
+                {
+                    return Some(address);
                 }
             }
+            None
         })
         .await
         .unwrap_or(None)
