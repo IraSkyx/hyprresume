@@ -31,6 +31,8 @@ pub async fn run(config: Config) -> Result<()> {
     populate_initial_state(&state, &resolver, &ctl).await?;
 
     if config.general.restore_on_start && snapshot.exists("last") {
+        tracing::info!("waiting for compositor to settle...");
+        wait_for_settle(&mut event_rx).await;
         tracing::info!("restoring previous session...");
         match snapshot.load("last") {
             Ok(session) => {
@@ -111,6 +113,14 @@ pub async fn run(config: Config) -> Result<()> {
     event_handle.abort();
     tracing::info!("daemon stopped");
     Ok(())
+}
+
+/// Drain events until there's a 1-second gap, indicating the compositor
+/// and its extensions (bars, shells) have finished their startup burst.
+async fn wait_for_settle(events: &mut mpsc::Receiver<HyprEvent>) {
+    let quiet = Duration::from_secs(1);
+    while let Ok(Some(_)) = tokio::time::timeout(quiet, events.recv()).await {}
+    tracing::info!("compositor settled");
 }
 
 async fn populate_initial_state(
