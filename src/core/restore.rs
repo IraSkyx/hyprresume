@@ -341,6 +341,16 @@ impl RestoreEngine {
 
         if let Some(ref addr) = addr {
             tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
+            // Belt-and-suspenders: explicitly move to the correct workspace.
+            // The named rule handles most cases, but forking apps (Electron)
+            // can open their main window after the rule is disabled.
+            drop(
+                ctl.dispatch(&format!(
+                    "movetoworkspacesilent {},address:0x{addr}",
+                    window.workspace
+                ))
+                .await,
+            );
         } else {
             tracing::warn!(
                 "{} did not appear within {}s",
