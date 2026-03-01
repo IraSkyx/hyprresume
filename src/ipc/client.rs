@@ -87,11 +87,7 @@ impl HyprCtl {
         self.plain(&format!("dispatch {args}")).await
     }
 
-    /// Launch a command with inline window rules (e.g. workspace placement, float).
-    /// Rules are passed directly to the exec'd window, avoiding class-based matching races.
-    pub async fn exec_with_rules(&self, rules: &[String], cmd: &str) -> Result<()> {
-        let rules_str = rules.join("; ");
-        self.dispatch(&format!("exec [{rules_str}] {cmd}")).await?;
-        Ok(())
+    pub async fn keyword(&self, args: &str) -> Result<String> {
+        self.plain(&format!("keyword {args}")).await
     }
 }

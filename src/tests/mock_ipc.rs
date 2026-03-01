@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_socket1_handles_exec_with_rules() {
+    async fn mock_socket1_handles_dispatch() {
         let dir = tempfile::tempdir().unwrap();
         let sock1 = dir.path().join("socket1.sock");
         let sock2 = dir.path().join("socket2.sock");
@@ -177,14 +177,21 @@ mod tests {
         let paths = HyprSocketPaths::new(sock1, sock2);
         let client = HyprCtl::new(paths);
 
-        let rules = vec![
-            "workspace 2 silent".to_string(),
-            "float".to_string(),
-            "size 800 600".to_string(),
-        ];
-        client.exec_with_rules(&rules, "nautilus").await.unwrap();
+        client.dispatch("exec firefox").await.unwrap();
         client
-            .exec_with_rules(&["workspace 3 silent".to_string()], "firefox")
+            .dispatch("movetoworkspacesilent 3,address:0xabc")
+            .await
+            .unwrap();
+        client
+            .dispatch("togglefloating address:0xabc")
+            .await
+            .unwrap();
+        client
+            .dispatch("resizewindowpixel exact 800 600,address:0xabc")
+            .await
+            .unwrap();
+        client
+            .dispatch("movewindowpixel exact 100 200,address:0xabc")
             .await
             .unwrap();
 
