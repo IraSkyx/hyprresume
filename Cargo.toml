@@ -28,7 +28,7 @@ futures = "0.3"
 debug = 0
 
 [profile.release]
-lto = "thin"
+lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
