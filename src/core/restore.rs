@@ -311,11 +311,11 @@ impl RestoreEngine {
         let class_escaped = regex::escape(&window.app_id);
 
         ctl.keyword(&format!(
-            "'windowrule[{rule_name}]:match:class ^({class_escaped})$'"
+            "windowrule[{rule_name}]:match:class ^({class_escaped})$"
         ))
         .await?;
         ctl.keyword(&format!(
-            "'windowrule[{rule_name}]:workspace {} silent'",
+            "windowrule[{rule_name}]:workspace {} silent",
             window.workspace
         ))
         .await?;
@@ -327,7 +327,7 @@ impl RestoreEngine {
         let addr = self.wait_for_open_event(events, &window.app_id).await;
 
         drop(
-            ctl.keyword(&format!("'windowrule[{rule_name}]:enable false'"))
+            ctl.keyword(&format!("windowrule[{rule_name}]:enable false"))
                 .await,
         );
 
