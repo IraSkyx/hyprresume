@@ -1,4 +1,5 @@
 mod config;
+mod core;
 mod ipc;
 mod models;
 mod resolver;
