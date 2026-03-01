@@ -320,7 +320,15 @@ impl RestoreEngine {
         ))
         .await?;
 
-        ctl.dispatch(&format!("exec {}", window.launch_cmd))
+        let exec_cmd = window.cwd.as_ref().map_or_else(
+            || format!("exec {}", window.launch_cmd),
+            |cwd| {
+                let escaped = shell_escape(cwd);
+                format!("exec sh -c 'cd {} && exec {}'", escaped, window.launch_cmd)
+            },
+        );
+
+        ctl.dispatch(&exec_cmd)
             .await
             .with_context(|| format!("launching {}", window.launch_cmd))?;
 
@@ -395,6 +403,10 @@ impl RestoreEngine {
         .await
         .unwrap_or(None)
     }
+}
+
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[derive(Debug, Default)]

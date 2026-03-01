@@ -93,6 +93,7 @@ mod tests {
                 size: client.size,
                 floating: client.floating,
                 fullscreen: client.fullscreen_mode > 0,
+                pid: client.pid,
             });
         }
 
@@ -194,6 +195,7 @@ mod tests {
             size: (1920, 1080),
             floating: false,
             fullscreen: false,
+            pid: 0,
         });
         state.add(TrackedWindow {
             address: "0xbbb".to_string(),
@@ -204,6 +206,7 @@ mod tests {
             size: (1920, 1080),
             floating: false,
             fullscreen: false,
+            pid: 0,
         });
         assert_eq!(state.window_count(), 2);
 
@@ -217,6 +220,7 @@ mod tests {
             size: (800, 600),
             floating: false,
             fullscreen: false,
+            pid: 0,
         });
         assert_eq!(state.window_count(), 3);
 
@@ -267,6 +271,7 @@ mod tests {
                 size: (1920, 1080),
                 floating: false,
                 fullscreen: false,
+                pid: 0,
             });
         }
         assert_eq!(state.window_count(), 3);
@@ -305,6 +310,7 @@ mod tests {
             size: (0, 0),
             floating: false,
             fullscreen: false,
+            pid: 0,
         });
 
         let session_dir = tempfile::tempdir().unwrap();
@@ -322,6 +328,7 @@ mod tests {
             size: (0, 0),
             floating: false,
             fullscreen: false,
+            pid: 0,
         });
         snapshot.save(&state, "gaming").unwrap();
 

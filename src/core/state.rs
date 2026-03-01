@@ -146,6 +146,7 @@ mod tests {
             size: (800, 600),
             floating: false,
             fullscreen: false,
+            pid: 0,
         }
     }
 

@@ -148,6 +148,7 @@ async fn cmd_save(cfg: &config::Config, name: Option<&str>) -> Result<()> {
             size: c.size,
             floating: c.floating,
             fullscreen: c.fullscreen_mode > 0,
+            pid: c.pid,
         });
     }
 

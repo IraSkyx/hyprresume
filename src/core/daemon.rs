@@ -150,6 +150,7 @@ async fn populate_initial_state(
             size: c.size,
             floating: c.floating,
             fullscreen: c.fullscreen_mode > 0,
+            pid: c.pid,
         });
     }
 
@@ -199,6 +200,7 @@ async fn handle_event(
                 size,
                 floating,
                 fullscreen,
+                pid,
             });
         }
         HyprEvent::CloseWindow { address } => {

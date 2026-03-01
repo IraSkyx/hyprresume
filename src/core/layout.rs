@@ -324,6 +324,7 @@ mod tests {
             fullscreen: false,
             position: Some((x, y)),
             size: Some((w, h)),
+            cwd: None,
         }
     }
 
@@ -456,6 +457,7 @@ mod tests {
             fullscreen: false,
             position: None,
             size: None,
+            cwd: None,
         };
         let refs = vec![&w];
         assert!(bounding_rect(&refs).is_none());

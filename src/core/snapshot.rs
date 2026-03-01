@@ -26,6 +26,7 @@ fn sanitize_session_name(name: &str) -> Result<&str> {
 }
 
 fn window_to_entry(w: &TrackedWindow) -> WindowEntry {
+    let cwd = crate::resolver::cwd::resolve_shell_cwd(w.pid);
     WindowEntry {
         app_id: w.app_id.clone(),
         launch_cmd: w.launch_cmd.clone(),
@@ -34,6 +35,7 @@ fn window_to_entry(w: &TrackedWindow) -> WindowEntry {
         fullscreen: w.fullscreen,
         position: Some(w.position),
         size: Some(w.size),
+        cwd,
     }
 }
 
@@ -184,6 +186,7 @@ mod tests {
                 size: (800, 600),
                 floating,
                 fullscreen: false,
+                pid: 0,
             });
         }
 
@@ -261,6 +264,7 @@ mod tests {
             size: (0, 0),
             floating: false,
             fullscreen: false,
+            pid: 0,
         });
 
         engine.save(&state, "empty").unwrap();

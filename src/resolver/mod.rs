@@ -1,3 +1,4 @@
+pub mod cwd;
 pub mod desktop;
 pub mod flatpak;
 pub mod proc;
