@@ -61,7 +61,6 @@ impl MockSocket2 {
             if stream.write_all(line.as_bytes()).await.is_err() {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
         drop(stream);
@@ -153,8 +152,6 @@ mod tests {
         let mock = MockSocket1::new(&sock1, json);
         let server = tokio::spawn(mock.serve());
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
         let paths = HyprSocketPaths::new(sock1, sock2);
         let client = HyprCtl::new(paths);
 
@@ -169,23 +166,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_socket1_handles_keyword_dispatch() {
+    async fn mock_socket1_handles_exec_with_rules() {
         let dir = tempfile::tempdir().unwrap();
         let sock1 = dir.path().join("socket1.sock");
         let sock2 = dir.path().join("socket2.sock");
 
         let mock = MockSocket1::new(&sock1, "[]".to_string());
         let server = tokio::spawn(mock.serve());
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let paths = HyprSocketPaths::new(sock1, sock2);
         let client = HyprCtl::new(paths);
 
+        let rules = vec![
+            "workspace 2 silent".to_string(),
+            "float".to_string(),
+            "size 800 600".to_string(),
+        ];
+        client.exec_with_rules(&rules, "nautilus").await.unwrap();
         client
-            .add_window_rule("workspace 1 silent, class:firefox")
+            .exec_with_rules(&["workspace 3 silent".to_string()], "firefox")
             .await
             .unwrap();
-        client.exec("firefox").await.unwrap();
 
         server.abort();
     }
@@ -198,8 +199,6 @@ mod tests {
         let events = fixture_events();
         let sock2_clone = sock2.clone();
         let emitter = tokio::spawn(MockSocket2::emit_events(sock2_clone, events));
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let (tx, mut rx) = mpsc::channel::<HyprEvent>(64);
         let sock2_for_listener = sock2.clone();
@@ -241,7 +240,6 @@ mod tests {
 
         let mock = MockSocket1::new(&sock1, fixture_clients_json());
         let server = tokio::spawn(mock.serve());
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let paths = HyprSocketPaths::new(sock1, sock2);
         let client = HyprCtl::new(paths);

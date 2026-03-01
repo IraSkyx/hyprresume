@@ -91,24 +91,16 @@ impl HyprCtl {
         self.plain(&format!("keyword {args}")).await
     }
 
-    pub async fn add_window_rule(&self, rule: &str) -> Result<()> {
-        let resp = self.keyword(&format!("windowrulev2 {rule}")).await?;
-        if !resp.starts_with("ok") {
-            bail!("failed to add window rule '{rule}': {resp}");
-        }
-        Ok(())
-    }
-
-    pub async fn remove_window_rule(&self, rule: &str) -> Result<()> {
-        let resp = self.keyword(&format!("windowrulev2 unset, {rule}")).await?;
-        if !resp.starts_with("ok") {
-            tracing::warn!("failed to remove window rule '{rule}': {resp}");
-        }
-        Ok(())
-    }
-
     pub async fn exec(&self, cmd: &str) -> Result<()> {
         self.dispatch(&format!("exec {cmd}")).await?;
+        Ok(())
+    }
+
+    /// Launch a command with inline window rules (e.g. workspace placement, float).
+    /// Rules are passed directly to the exec'd window, avoiding class-based matching races.
+    pub async fn exec_with_rules(&self, rules: &[String], cmd: &str) -> Result<()> {
+        let rules_str = rules.join("; ");
+        self.dispatch(&format!("exec [{rules_str}] {cmd}")).await?;
         Ok(())
     }
 }

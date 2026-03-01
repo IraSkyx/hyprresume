@@ -338,11 +338,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
 
-        let state = make_state_with_windows(vec![("0xa", "firefox", "1", false)]);
-        engine.save(&state, "first").unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        engine.save(&state, "second").unwrap();
+        std::fs::write(
+            dir.path().join("first.toml"),
+            "[session]\nname = \"first\"\ntimestamp = 1000\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("second.toml"),
+            "[session]\nname = \"second\"\ntimestamp = 2000\n",
+        )
+        .unwrap();
 
         let sessions = engine.list().unwrap();
         assert_eq!(sessions.len(), 2);

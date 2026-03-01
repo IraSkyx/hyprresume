@@ -20,6 +20,16 @@ pub async fn run(config: Config) -> Result<()> {
     let state = Arc::new(Mutex::new(StateManager::new(&config)));
     let snapshot = Arc::new(SnapshotEngine::new(&config)?);
 
+    let (event_tx, mut event_rx) = mpsc::channel::<HyprEvent>(256);
+    let paths = ctl.socket_paths().clone();
+    let event_handle = tokio::spawn(async move {
+        if let Err(e) = event_listener::listen(&paths, event_tx).await {
+            tracing::error!("event listener error: {e}");
+        }
+    });
+
+    populate_initial_state(&state, &resolver, &ctl).await?;
+
     if config.general.restore_on_start && snapshot.exists("last") {
         tracing::info!("restoring previous session...");
         match snapshot.load("last") {
@@ -36,19 +46,7 @@ pub async fn run(config: Config) -> Result<()> {
                 tracing::warn!("failed to load session 'last': {e}");
             }
         }
-
-        tokio::time::sleep(Duration::from_secs(3)).await;
     }
-
-    populate_initial_state(&state, &resolver, &ctl).await?;
-
-    let (event_tx, mut event_rx) = mpsc::channel::<HyprEvent>(256);
-    let paths = ctl.socket_paths().clone();
-    let event_handle = tokio::spawn(async move {
-        if let Err(e) = event_listener::listen(&paths, event_tx).await {
-            tracing::error!("event listener error: {e}");
-        }
-    });
 
     let mut signals =
         Signals::new([SIGINT, SIGTERM, SIGUSR1]).context("registering signal handlers")?;

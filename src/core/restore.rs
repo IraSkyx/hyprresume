@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use std::time::Duration;
 
 use crate::ipc::client::HyprCtl;
 use crate::models::{SessionFile, WindowEntry};
@@ -53,35 +52,26 @@ impl RestoreEngine {
     }
 
     async fn restore_window(&self, window: &WindowEntry, ctl: &HyprCtl) -> Result<()> {
-        let class = &window.app_id;
-        let class_matcher = format!("class:^({class})$");
+        let mut rules = vec![format!("workspace {} silent", window.workspace)];
 
-        let rule = format!("workspace {} silent, {class_matcher}", window.workspace);
-        ctl.add_window_rule(&rule).await?;
-
-        if window.floating && self.restore_geometry {
-            ctl.add_window_rule(&format!("float, {class_matcher}"))
-                .await?;
-
-            if let Some((w, h)) = window.size {
-                ctl.add_window_rule(&format!("size {w} {h}, {class_matcher}"))
-                    .await?;
+        if self.restore_geometry {
+            if window.floating {
+                rules.push("float".to_string());
+                if let Some((w, h)) = window.size {
+                    rules.push(format!("size {w} {h}"));
+                }
+                if let Some((x, y)) = window.position {
+                    rules.push(format!("move {x} {y}"));
+                }
             }
-            if let Some((x, y)) = window.position {
-                ctl.add_window_rule(&format!("move {x} {y}, {class_matcher}"))
-                    .await?;
+            if window.fullscreen {
+                rules.push("fullscreen".to_string());
             }
         }
 
-        ctl.exec(&window.launch_cmd)
+        ctl.exec_with_rules(&rules, &window.launch_cmd)
             .await
-            .with_context(|| format!("launching {}", window.launch_cmd))?;
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        drop(ctl.remove_window_rule(&class_matcher).await);
-
-        Ok(())
+            .with_context(|| format!("launching {}", window.launch_cmd))
     }
 }
 
