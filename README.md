@@ -1,39 +1,37 @@
 # hyprresume
 
-Session persistence for [Hyprland](https://hyprland.org). Remembers your open applications and restores them on startup, like you never logged out.
+Session persistence for [Hyprland](https://hyprland.org). Saves your open applications and puts them back on the right workspaces after a reboot.
 
-hyprresume runs as a background daemon, listens to Hyprland window events via IPC, and periodically saves your session to disk. On next launch it restores your apps to the right workspaces with the correct geometry.
-
-## How it works
-
-- Tracks window open/close/move/float events through Hyprland's socket2
-- Resolves launch commands from `.desktop` files, Flatpak cgroups, or `/proc`
+- Resolves launch commands from `.desktop` files, Flatpak cgroups or `/proc`
 - Saves sessions as human-readable TOML
-- Restores apps to their original workspaces with floating position and size
-- Saves automatically on SIGTERM/SIGINT (logout, shutdown) and on a timer
+- Restores apps to their original workspaces with floating window geometry
+- Tiling layout reconstruction is experimental
 
 ## Install
+
+**Arch Linux (AUR):**
+
+```sh
+paru -S hyprresume    # or yay, etc.
+```
+
+**From source:**
 
 ```sh
 cargo install --path .
 ```
 
-Or build a release binary:
-
-```sh
-cargo build --release
-# binary at target/release/hyprresume
-```
-
 ## Usage
 
-Start the daemon (typically from your `hyprland.conf`):
+Add to your `hyprland.conf`:
 
 ```conf
 exec-once = hyprresume
 ```
 
-Manual commands:
+This starts the daemon, which restores your previous session, tracks window changes and saves periodically. It also saves on logout/shutdown via SIGTERM.
+
+### Commands
 
 ```sh
 hyprresume save [name]      # snapshot current session
@@ -55,7 +53,7 @@ Place a config file at `~/.config/hypr/hyprresume.toml`. All fields are optional
 save_interval = 120           # seconds between auto-saves
 session_dir = "~/.local/share/hyprresume"
 restore_on_start = true
-per_window_launch = false     # one process per app, not per window
+per_window_launch = true      # one process per window, not per unique app
 restore_geometry = true       # restore floating window position/size
 
 [rules]
