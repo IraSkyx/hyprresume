@@ -4,31 +4,33 @@ const KNOWN_SHELLS: &[&str] = &[
     "bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "ion", "xonsh",
 ];
 
-/// Resolve the working directory of a child shell process.
+/// Resolve CWDs for ALL child shell processes of a given PID.
 ///
-/// Walks `/proc/<pid>/task/*/children` to find direct child processes,
-/// checks if any is a known shell, and reads its CWD via `/proc/<child>/cwd`.
-pub fn resolve_shell_cwd(pid: i64) -> Option<String> {
+/// Single-instance terminals (e.g. ghostty with `--gtk-single-instance`)
+/// share one PID across all windows, each spawning its own shell child.
+/// This returns all distinct CWDs so callers can distribute them.
+pub fn resolve_all_shell_cwds(pid: i64) -> Vec<String> {
     if pid <= 0 {
-        return None;
+        return Vec::new();
     }
 
+    let mut cwds = Vec::new();
     for child_pid in child_pids(pid) {
         if let Some(cwd) = try_read_shell_cwd(child_pid) {
             tracing::debug!("pid {pid} → child shell {child_pid} → cwd {cwd}");
-            return Some(cwd);
+            cwds.push(cwd);
+            continue;
         }
 
-        // Check grandchildren (e.g. terminal → shell wrapper → actual shell)
         for grandchild in child_pids(child_pid) {
             if let Some(cwd) = try_read_shell_cwd(grandchild) {
                 tracing::debug!("pid {pid} → grandchild shell {grandchild} → cwd {cwd}");
-                return Some(cwd);
+                cwds.push(cwd);
             }
         }
     }
 
-    None
+    cwds
 }
 
 fn try_read_shell_cwd(pid: i64) -> Option<String> {
@@ -80,22 +82,22 @@ mod tests {
     #[test]
     fn own_process_has_no_shell_child() {
         let pid = i64::from(std::process::id());
-        assert!(resolve_shell_cwd(pid).is_none());
+        assert!(resolve_all_shell_cwds(pid).is_empty());
     }
 
     #[test]
-    fn negative_pid_returns_none() {
-        assert!(resolve_shell_cwd(-1).is_none());
+    fn negative_pid_returns_empty() {
+        assert!(resolve_all_shell_cwds(-1).is_empty());
     }
 
     #[test]
-    fn zero_pid_returns_none() {
-        assert!(resolve_shell_cwd(0).is_none());
+    fn zero_pid_returns_empty() {
+        assert!(resolve_all_shell_cwds(0).is_empty());
     }
 
     #[test]
-    fn nonexistent_pid_returns_none() {
-        assert!(resolve_shell_cwd(999_999_999).is_none());
+    fn nonexistent_pid_returns_empty() {
+        assert!(resolve_all_shell_cwds(999_999_999).is_empty());
     }
 
     #[test]

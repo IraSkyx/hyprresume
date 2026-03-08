@@ -25,8 +25,36 @@ fn sanitize_session_name(name: &str) -> Result<&str> {
     Ok(name)
 }
 
-fn window_to_entry(w: &TrackedWindow) -> WindowEntry {
-    let cwd = crate::resolver::cwd::resolve_shell_cwd(w.pid);
+fn resolve_cwds_for_windows(windows: &[&TrackedWindow]) -> Vec<Option<String>> {
+    use std::collections::HashMap;
+
+    let mut pid_cwds: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut pid_cursor: HashMap<i64, usize> = HashMap::new();
+
+    for w in windows {
+        if w.pid > 0 {
+            pid_cwds
+                .entry(w.pid)
+                .or_insert_with(|| crate::resolver::cwd::resolve_all_shell_cwds(w.pid));
+        }
+    }
+
+    windows
+        .iter()
+        .map(|w| {
+            if w.pid <= 0 {
+                return None;
+            }
+            let cwds = pid_cwds.get(&w.pid)?;
+            let idx = pid_cursor.entry(w.pid).or_insert(0);
+            let cwd = cwds.get(*idx).cloned();
+            *idx += 1;
+            cwd
+        })
+        .collect()
+}
+
+fn window_to_entry(w: &TrackedWindow, cwd: Option<String>) -> WindowEntry {
     WindowEntry {
         app_id: w.app_id.clone(),
         launch_cmd: w.launch_cmd.clone(),
@@ -55,20 +83,27 @@ impl SnapshotEngine {
         let name = sanitize_session_name(name)?;
         let windows = state.windows();
 
-        let entries: Vec<WindowEntry> = if self.per_window_launch {
+        let eligible: Vec<&TrackedWindow> = if self.per_window_launch {
             windows
                 .iter()
+                .copied()
                 .filter(|w| !w.launch_cmd.is_empty())
-                .map(|w| window_to_entry(w))
                 .collect()
         } else {
             let mut seen = std::collections::HashSet::new();
             windows
                 .iter()
+                .copied()
                 .filter(|w| !w.launch_cmd.is_empty() && seen.insert(w.app_id.clone()))
-                .map(|w| window_to_entry(w))
                 .collect()
         };
+
+        let cwds = resolve_cwds_for_windows(&eligible);
+        let entries: Vec<WindowEntry> = eligible
+            .iter()
+            .zip(cwds)
+            .map(|(w, cwd)| window_to_entry(w, cwd))
+            .collect();
 
         let session_file = SessionFile {
             session: SessionMeta {

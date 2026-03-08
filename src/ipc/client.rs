@@ -90,4 +90,9 @@ impl HyprCtl {
     pub async fn keyword(&self, args: &str) -> Result<String> {
         self.plain(&format!("keyword {args}")).await
     }
+
+    pub async fn get_option(&self, name: &str) -> Result<bool> {
+        let raw = self.plain(&format!("getoption {name}")).await?;
+        Ok(raw.contains("int: 1"))
+    }
 }

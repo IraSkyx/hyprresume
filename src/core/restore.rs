@@ -11,11 +11,22 @@ use crate::models::{HyprEvent, SessionFile, WindowEntry};
 
 const WINDOW_APPEAR_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Flags that force single-instance behavior, preventing separate CWDs.
+/// Known terminal working-directory flags, keyed by binary name.
+const TERMINAL_CWD_FLAGS: &[(&str, &str)] = &[
+    ("ghostty", "--working-directory="),
+    ("kitty", "--directory="),
+    ("alacritty", "--working-directory="),
+    ("wezterm", "--cwd="),
+    ("foot", "--working-directory="),
+    ("tilix", "--working-directory="),
+    ("terminator", "--working-directory="),
+];
+
+/// Flags that force single-instance behavior via D-Bus, which prevents
+/// each launched process from being independent (breaking CWD).
 const SINGLE_INSTANCE_FLAGS: &[&str] = &[
     "--gtk-single-instance=true",
     "--single-instance",
-    "--ozone-platform-hint=auto",
 ];
 
 pub struct RestoreEngine {
@@ -58,6 +69,14 @@ impl RestoreEngine {
             }
         });
 
+        let had_focus_on_activate = ctl
+            .get_option("misc:focus_on_activate")
+            .await
+            .unwrap_or(true);
+        if had_focus_on_activate {
+            drop(ctl.keyword("misc:focus_on_activate false").await);
+        }
+
         let mut active_rules = Vec::new();
 
         if self.restore_layout {
@@ -69,6 +88,9 @@ impl RestoreEngine {
         }
 
         disable_all_rules(ctl, &active_rules).await;
+        if had_focus_on_activate {
+            drop(ctl.keyword("misc:focus_on_activate true").await);
+        }
         listener.abort();
 
         tracing::info!(
@@ -357,9 +379,12 @@ impl RestoreEngine {
         active_rules.push(rule_name);
 
         let launch_cmd = build_launch_cmd(window);
-        ctl.dispatch(&format!("exec {launch_cmd}"))
-            .await
-            .with_context(|| format!("launching {}", window.launch_cmd))?;
+        ctl.dispatch(&format!(
+            "exec [workspace {} silent] {launch_cmd}",
+            window.workspace
+        ))
+        .await
+        .with_context(|| format!("launching {}", window.launch_cmd))?;
 
         let addr = self.wait_for_open_event(events, &window.app_id).await;
 
@@ -437,16 +462,24 @@ impl RestoreEngine {
     }
 }
 
-/// Build the exec command, stripping single-instance flags when a CWD
-/// needs to be restored (otherwise the second instance just delegates
-/// to the first, ignoring our CWD wrapper).
+/// Build the exec command, injecting the saved CWD.
+///
+/// For known terminals: strips single-instance flags (so each launch is
+/// its own process) and appends `--working-directory=<path>`.
+/// For other apps: wraps with `cd <path> && exec <cmd>`.
 fn build_launch_cmd(window: &WindowEntry) -> String {
-    window.cwd.as_ref().map_or_else(
-        || window.launch_cmd.clone(),
-        |cwd| {
-            let clean_cmd = strip_single_instance_flags(&window.launch_cmd);
+    let Some(cwd) = window.cwd.as_deref() else {
+        return window.launch_cmd.clone();
+    };
+
+    terminal_cwd_flag(&window.launch_cmd).map_or_else(
+        || {
             let escaped = shell_escape(cwd);
-            format!("sh -c 'cd {escaped} && exec {clean_cmd}'")
+            format!("sh -c 'cd {escaped} && exec {}'", window.launch_cmd)
+        },
+        |flag| {
+            let clean = strip_single_instance_flags(&window.launch_cmd);
+            format!("{clean} {flag}{cwd}")
         },
     )
 }
@@ -456,6 +489,20 @@ fn strip_single_instance_flags(cmd: &str) -> String {
         .filter(|arg| !SINGLE_INSTANCE_FLAGS.contains(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Match the binary name in a launch command against known terminals
+/// and return the appropriate `--working-directory=` style flag.
+fn terminal_cwd_flag(launch_cmd: &str) -> Option<&'static str> {
+    let bin = launch_cmd
+        .split_whitespace()
+        .next()?
+        .rsplit('/')
+        .next()?;
+    TERMINAL_CWD_FLAGS
+        .iter()
+        .find(|(name, _)| *name == bin)
+        .map(|(_, flag)| *flag)
 }
 
 fn shell_escape(s: &str) -> String {
