@@ -462,23 +462,32 @@ impl RestoreEngine {
     }
 }
 
-/// Build the exec command, injecting the saved CWD.
+/// Build the exec command, injecting browser profile flags and/or saved CWD.
+///
+/// Profile flags (e.g. `-P work`, `--profile-directory=Profile 1`) are
+/// appended to the base launch command before CWD handling, since browsers
+/// and terminals are mutually exclusive in practice.
 ///
 /// For known terminals: strips single-instance flags (so each launch is
 /// its own process) and appends `--working-directory=<path>`.
-/// For other apps: wraps with `cd <path> && exec <cmd>`.
+/// For other apps with CWD: wraps with `cd <path> && exec <cmd>`.
 fn build_launch_cmd(window: &WindowEntry) -> String {
-    let Some(cwd) = window.cwd.as_deref() else {
-        return window.launch_cmd.clone();
+    let cmd = match &window.profile {
+        Some(profile) => format!("{} {profile}", window.launch_cmd),
+        None => window.launch_cmd.clone(),
     };
 
-    terminal_cwd_flag(&window.launch_cmd).map_or_else(
+    let Some(cwd) = window.cwd.as_deref() else {
+        return cmd;
+    };
+
+    terminal_cwd_flag(&cmd).map_or_else(
         || {
             let escaped = shell_escape(cwd);
-            format!("sh -c 'cd {escaped} && exec {}'", window.launch_cmd)
+            format!("sh -c 'cd {escaped} && exec {cmd}'")
         },
         |flag| {
-            let clean = strip_single_instance_flags(&window.launch_cmd);
+            let clean = strip_single_instance_flags(&cmd);
             format!("{clean} {flag}{cwd}")
         },
     )
@@ -526,4 +535,90 @@ pub struct RestoreReport {
     pub restored: usize,
     pub failed: usize,
     pub errors: Vec<(String, String)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entry(
+        app_id: &str,
+        launch_cmd: &str,
+        profile: Option<&str>,
+        cwd: Option<&str>,
+    ) -> WindowEntry {
+        WindowEntry {
+            app_id: app_id.to_string(),
+            launch_cmd: launch_cmd.to_string(),
+            workspace: "1".to_string(),
+            floating: false,
+            fullscreen: false,
+            position: None,
+            size: None,
+            cwd: cwd.map(String::from),
+            profile: profile.map(String::from),
+        }
+    }
+
+    #[test]
+    fn build_cmd_no_profile_no_cwd() {
+        let entry = make_entry("firefox", "firefox", None, None);
+        assert_eq!(build_launch_cmd(&entry), "firefox");
+    }
+
+    #[test]
+    fn build_cmd_with_profile() {
+        let entry = make_entry("firefox", "firefox", Some("-P work"), None);
+        assert_eq!(build_launch_cmd(&entry), "firefox -P work");
+    }
+
+    #[test]
+    fn build_cmd_with_no_remote_profile() {
+        let entry = make_entry("firefox", "firefox", Some("-no-remote -P dev"), None);
+        assert_eq!(build_launch_cmd(&entry), "firefox -no-remote -P dev");
+    }
+
+    #[test]
+    fn build_cmd_chromium_profile() {
+        let entry = make_entry(
+            "chromium",
+            "chromium",
+            Some("--profile-directory=Profile 1"),
+            None,
+        );
+        assert_eq!(
+            build_launch_cmd(&entry),
+            "chromium --profile-directory=Profile 1"
+        );
+    }
+
+    #[test]
+    fn build_cmd_flatpak_profile() {
+        let entry = make_entry(
+            "org.mozilla.firefox",
+            "flatpak run org.mozilla.firefox",
+            Some("-P work"),
+            None,
+        );
+        assert_eq!(
+            build_launch_cmd(&entry),
+            "flatpak run org.mozilla.firefox -P work"
+        );
+    }
+
+    #[test]
+    fn build_cmd_with_cwd_no_profile() {
+        let entry = make_entry("ghostty", "ghostty", None, Some("/home/user/project"));
+        assert_eq!(
+            build_launch_cmd(&entry),
+            "ghostty --working-directory=/home/user/project"
+        );
+    }
+
+    #[test]
+    fn build_cmd_profile_does_not_affect_cwd() {
+        let entry = make_entry("ghostty", "ghostty", None, Some("/tmp"));
+        let cmd = build_launch_cmd(&entry);
+        assert!(cmd.contains("--working-directory=/tmp"));
+    }
 }
