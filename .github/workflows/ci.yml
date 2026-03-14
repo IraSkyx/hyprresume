@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - ".github/**"
+      - ".vscode/**"
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install mold
+        run: sudo apt-get install -y mold
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: make build
+
+      - name: Format
+        run: make format FMT_FLAGS="-- --check"
+
+      - name: Lint
+        run: make lint
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Test
+        run: make test
