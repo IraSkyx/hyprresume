@@ -69,7 +69,10 @@ struct IndexedWindow {
     h: i32,
 }
 
-fn extract_indexed(windows: &[&WindowEntry], global_indices: &[usize]) -> Option<Vec<IndexedWindow>> {
+fn extract_indexed(
+    windows: &[&WindowEntry],
+    global_indices: &[usize],
+) -> Option<Vec<IndexedWindow>> {
     windows
         .iter()
         .zip(global_indices)
@@ -96,7 +99,9 @@ fn infer_bsp(indexed: &[IndexedWindow], bounds: Rect) -> Option<BspNode> {
         return None;
     }
     if indexed.len() == 1 {
-        return Some(BspNode::Leaf { idx: indexed[0].idx });
+        return Some(BspNode::Leaf {
+            idx: indexed[0].idx,
+        });
     }
 
     try_split(indexed, bounds, SplitDir::Horizontal)

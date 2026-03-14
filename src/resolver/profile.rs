@@ -270,10 +270,7 @@ mod tests {
     #[test]
     fn firefox_absolute_path_exe() {
         let args = vec![s("/usr/bin/firefox"), s("-P"), s("personal")];
-        assert_eq!(
-            detect_profile_from_args(&args),
-            Some(s("-P personal"))
-        );
+        assert_eq!(detect_profile_from_args(&args), Some(s("-P personal")));
     }
 
     #[test]
@@ -416,7 +413,9 @@ mod tests {
 
     #[test]
     fn chromium_single_arg_cmdline() {
-        let args = vec![s("/usr/lib/chromium/chromium --profile-directory=WorkProfile")];
+        let args = vec![s(
+            "/usr/lib/chromium/chromium --profile-directory=WorkProfile",
+        )];
         assert_eq!(
             detect_profile_from_args(&args),
             Some(s("--profile-directory=WorkProfile"))

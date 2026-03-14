@@ -96,8 +96,7 @@ impl SnapshotEngine {
                 .iter()
                 .copied()
                 .filter(|w| {
-                    !w.launch_cmd.is_empty()
-                        && seen.insert((w.app_id.clone(), w.profile.clone()))
+                    !w.launch_cmd.is_empty() && seen.insert((w.app_id.clone(), w.profile.clone()))
                 })
                 .collect()
         };
@@ -400,11 +399,7 @@ mod tests {
             Some("--profile-directory=Profile 1")
         );
 
-        let code = loaded
-            .windows
-            .iter()
-            .find(|w| w.app_id == "code")
-            .unwrap();
+        let code = loaded.windows.iter().find(|w| w.app_id == "code").unwrap();
         assert!(code.profile.is_none());
     }
 
