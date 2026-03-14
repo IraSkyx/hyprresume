@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
-use crate::core::layout::{self, RestoreStep};
+use crate::core::layout::{self, WorkspacePlan};
 use crate::ipc::client::HyprCtl;
 use crate::ipc::event_listener::parse_event;
 use crate::models::{HyprEvent, SessionFile, WindowEntry};
@@ -152,7 +152,7 @@ impl RestoreEngine {
             .execute_bsp_plans(session, ctl, events, report, &ws_plans, active_rules)
             .await?;
 
-        self.adjust_tiled_sizes(session, ctl, &addresses).await;
+        self.converge_tiled_sizes(session, ctl, &addresses).await;
         self.apply_fullscreen(session, ctl, &addresses).await?;
 
         self.restore_indexed(
@@ -181,7 +181,7 @@ impl RestoreEngine {
 
     fn build_layout_plans(
         session: &SessionFile,
-    ) -> (Vec<usize>, HashMap<String, Vec<RestoreStep>>, Vec<usize>) {
+    ) -> (Vec<usize>, HashMap<String, WorkspacePlan>, Vec<usize>) {
         let floating: Vec<usize> = session
             .windows
             .iter()
@@ -199,7 +199,7 @@ impl RestoreEngine {
             }
         }
 
-        let mut ws_plans: HashMap<String, Vec<RestoreStep>> = HashMap::new();
+        let mut ws_plans: HashMap<String, WorkspacePlan> = HashMap::new();
         let mut fallback_windows: Vec<usize> = Vec::new();
 
         for (ws, (wins, indices)) in &ws_groups {
@@ -226,16 +226,17 @@ impl RestoreEngine {
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
-        ws_plans: &HashMap<String, Vec<RestoreStep>>,
+        ws_plans: &HashMap<String, WorkspacePlan>,
         active_rules: &mut Vec<String>,
     ) -> Result<HashMap<usize, String>> {
         let mut addresses: HashMap<usize, String> = HashMap::new();
         let mut sorted_ws: Vec<&String> = ws_plans.keys().collect();
         sorted_ws.sort();
+        let mut rule_counter = 0usize;
 
         for ws in sorted_ws {
             let plan = &ws_plans[ws];
-            for step in plan {
+            for (i, step) in plan.steps.iter().enumerate() {
                 let window = &session.windows[step.window_idx];
                 tracing::info!(
                     "[layout] restoring {} on workspace {} (focus={:?}, presel={:?})",
@@ -252,10 +253,12 @@ impl RestoreEngine {
                         .await?;
                     ctl.dispatch(&format!("layoutmsg preselect {presel}"))
                         .await?;
+                } else if i == 0 {
+                    ctl.dispatch(&format!("workspace {ws}")).await?;
                 }
 
                 match self
-                    .launch_and_track(window, ctl, events, active_rules)
+                    .bsp_launch_and_track(window, ctl, events, active_rules, &mut rule_counter)
                     .await
                 {
                     Ok(Some(addr)) => {
@@ -279,34 +282,123 @@ impl RestoreEngine {
         Ok(addresses)
     }
 
-    async fn adjust_tiled_sizes(
+    /// BSP-specific launch: switches to the workspace first (so preselect
+    /// works even for single-instance apps), strips single-instance flags,
+    /// and does NOT use `[workspace N silent]` since we are already on the
+    /// target workspace.
+    async fn bsp_launch_and_track(
+        &self,
+        window: &WindowEntry,
+        ctl: &HyprCtl,
+        events: &mut mpsc::Receiver<HyprEvent>,
+        active_rules: &mut Vec<String>,
+        rule_counter: &mut usize,
+    ) -> Result<Option<String>> {
+        let rule_name = format!(
+            "hyprresume-{}-{}",
+            window.app_id.replace(['.', ' '], "-"),
+            rule_counter
+        );
+        *rule_counter += 1;
+        let class_escaped = regex::escape(&window.app_id);
+
+        ctl.keyword(&format!(
+            "windowrule[{rule_name}]:match:class ^({class_escaped})$"
+        ))
+        .await?;
+        ctl.keyword(&format!(
+            "windowrule[{rule_name}]:workspace {} silent",
+            window.workspace
+        ))
+        .await?;
+        active_rules.push(rule_name);
+
+        let launch_cmd = build_bsp_launch_cmd(window);
+        ctl.dispatch(&format!("exec {launch_cmd}"))
+            .await
+            .with_context(|| format!("launching {}", window.launch_cmd))?;
+
+        let addr = self.wait_for_open_event(events, &window.app_id).await;
+
+        if let Some(ref addr) = addr {
+            tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
+            drop(
+                ctl.dispatch(&format!(
+                    "movetoworkspacesilent {},address:0x{addr}",
+                    window.workspace
+                ))
+                .await,
+            );
+        } else {
+            tracing::warn!(
+                "{} did not appear within {}s",
+                window.app_id,
+                WINDOW_APPEAR_TIMEOUT.as_secs()
+            );
+        }
+
+        Ok(addr)
+    }
+
+    /// Iteratively resize tiled windows to match their saved sizes.
+    /// Each pass queries live geometry and applies pixel deltas; multiple
+    /// passes handle cascading effects where resizing one window shifts
+    /// its neighbours.
+    async fn converge_tiled_sizes(
         &self,
         session: &SessionFile,
         ctl: &HyprCtl,
         addresses: &HashMap<usize, String>,
     ) {
-        for (idx, addr) in addresses {
-            let window = &session.windows[*idx];
-            if let Some((saved_w, saved_h)) = window.size
-                && let Ok(Some(client)) = ctl.get_client_by_address(addr).await
-            {
-                let (cur_w, cur_h) = client.size;
-                let dx = saved_w - cur_w;
-                let dy = saved_h - cur_h;
-                if dx.abs() > 2 || dy.abs() > 2 {
+        const MAX_PASSES: usize = 4;
+        const TOLERANCE: i32 = 6;
+
+        for pass in 0..MAX_PASSES {
+            let mut all_ok = true;
+
+            for (idx, addr) in addresses {
+                let window = &session.windows[*idx];
+                let Some((saved_w, saved_h)) = window.size else {
+                    continue;
+                };
+                let Ok(Some(client)) = ctl.get_client_by_address(addr).await else {
+                    continue;
+                };
+
+                let dw = saved_w - client.size.0;
+                let dh = saved_h - client.size.1;
+
+                if dw.abs() > TOLERANCE || dh.abs() > TOLERANCE {
+                    all_ok = false;
                     tracing::debug!(
-                        "  resizing {} by ({dx}, {dy}) to match saved layout",
-                        window.app_id
+                        "  pass {}: resize {} by ({dw}, {dh})",
+                        pass + 1,
+                        window.app_id,
                     );
-                    drop(
-                        ctl.dispatch(&format!("resizewindowpixel {dx} {dy},address:0x{addr}"))
-                            .await,
-                    );
+                    match ctl
+                        .dispatch(&format!("resizewindowpixel {dw} {dh},address:0x{addr}"))
+                        .await
+                    {
+                        Ok(resp) if resp.trim() != "ok" => {
+                            tracing::warn!("  resize failed: {resp}");
+                        }
+                        Err(e) => tracing::warn!("  resize ipc error: {e}"),
+                        _ => {}
+                    }
                 }
             }
+
+            if all_ok {
+                tracing::debug!("  tiled sizes converged after {} pass(es)", pass + 1);
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(60)).await;
         }
+        tracing::debug!("  tiled sizes settled after {MAX_PASSES} passes");
     }
 
+    /// Iterative convergence: re-query window sizes and apply pixel corrections
     async fn apply_fullscreen(
         &self,
         session: &SessionFile,
@@ -363,7 +455,11 @@ impl RestoreEngine {
         events: &mut mpsc::Receiver<HyprEvent>,
         active_rules: &mut Vec<String>,
     ) -> Result<Option<String>> {
-        let rule_name = format!("hyprresume-{}", window.app_id.replace(['.', ' '], "-"));
+        let rule_name = format!(
+            "hyprresume-{}-{}",
+            window.app_id.replace(['.', ' '], "-"),
+            active_rules.len()
+        );
         let class_escaped = regex::escape(&window.app_id);
 
         ctl.keyword(&format!(
@@ -499,6 +595,15 @@ fn strip_single_instance_flags(cmd: &str) -> String {
         .filter(|arg| !SINGLE_INSTANCE_FLAGS.contains(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Build launch command for BSP restore: always strips single-instance flags
+/// so each launch creates an independent process (critical for preselect to
+/// work — single-instance apps create windows in the existing process's
+/// workspace, bypassing the preselection on the target workspace).
+fn build_bsp_launch_cmd(window: &WindowEntry) -> String {
+    let base = build_launch_cmd(window);
+    strip_single_instance_flags(&base)
 }
 
 /// Match the binary name in a launch command against known terminals
