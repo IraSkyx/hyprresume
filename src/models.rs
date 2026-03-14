@@ -15,6 +15,8 @@ pub struct TrackedWindow {
     #[serde(default)]
     pub fullscreen: bool,
     pub pid: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -45,6 +47,8 @@ pub struct WindowEntry {
     pub size: Option<(i32, i32)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// Raw client data from `hyprctl clients -j`.
@@ -121,6 +125,7 @@ mod tests {
                     position: None,
                     size: None,
                     cwd: None,
+                    profile: None,
                 },
                 WindowEntry {
                     app_id: "nautilus".to_string(),
@@ -131,6 +136,7 @@ mod tests {
                     position: Some((200, 150)),
                     size: Some((900, 600)),
                     cwd: None,
+                    profile: None,
                 },
             ],
         };
@@ -276,6 +282,7 @@ workspace = "1"
             floating: true,
             fullscreen: false,
             pid: 12345,
+            profile: None,
         };
 
         let json = serde_json::to_string(&window).unwrap();

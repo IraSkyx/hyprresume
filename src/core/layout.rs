@@ -325,6 +325,7 @@ mod tests {
             position: Some((x, y)),
             size: Some((w, h)),
             cwd: None,
+            profile: None,
         }
     }
 
@@ -458,6 +459,7 @@ mod tests {
             position: None,
             size: None,
             cwd: None,
+            profile: None,
         };
         let refs = vec![&w];
         assert!(bounding_rect(&refs).is_none());

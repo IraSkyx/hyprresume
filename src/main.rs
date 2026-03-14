@@ -139,6 +139,7 @@ async fn cmd_save(cfg: &config::Config, name: Option<&str>) -> Result<()> {
             continue;
         }
         let launch_cmd = resolver.resolve(&c.class, c.pid).unwrap_or_default();
+        let profile = resolver::profile::detect_browser_profile(c.pid);
         state.add(models::TrackedWindow {
             address: c.address,
             app_id: c.class,
@@ -149,6 +150,7 @@ async fn cmd_save(cfg: &config::Config, name: Option<&str>) -> Result<()> {
             floating: c.floating,
             fullscreen: c.fullscreen_mode > 0,
             pid: c.pid,
+            profile,
         });
     }
 

@@ -147,6 +147,7 @@ mod tests {
             floating: false,
             fullscreen: false,
             pid: 0,
+            profile: None,
         }
     }
 

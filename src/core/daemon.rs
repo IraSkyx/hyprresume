@@ -140,6 +140,7 @@ async fn populate_initial_state(
         }
 
         let launch_cmd = resolver.resolve(&c.class, c.pid).unwrap_or_default();
+        let profile = crate::resolver::profile::detect_browser_profile(c.pid);
 
         state.add(crate::models::TrackedWindow {
             address: c.address,
@@ -151,6 +152,7 @@ async fn populate_initial_state(
             floating: c.floating,
             fullscreen: c.fullscreen_mode > 0,
             pid: c.pid,
+            profile,
         });
     }
 
@@ -189,6 +191,7 @@ async fn handle_event(
                 };
 
             let launch_cmd = resolver.resolve(&class, pid).unwrap_or_default();
+            let profile = crate::resolver::profile::detect_browser_profile(pid);
 
             let mut state = state.lock().await;
             state.add(crate::models::TrackedWindow {
@@ -201,6 +204,7 @@ async fn handle_event(
                 floating,
                 fullscreen,
                 pid,
+                profile,
             });
         }
         HyprEvent::CloseWindow { address } => {

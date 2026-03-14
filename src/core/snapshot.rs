@@ -64,6 +64,7 @@ fn window_to_entry(w: &TrackedWindow, cwd: Option<String>) -> WindowEntry {
         position: Some(w.position),
         size: Some(w.size),
         cwd,
+        profile: w.profile.clone(),
     }
 }
 
@@ -94,7 +95,10 @@ impl SnapshotEngine {
             windows
                 .iter()
                 .copied()
-                .filter(|w| !w.launch_cmd.is_empty() && seen.insert(w.app_id.clone()))
+                .filter(|w| {
+                    !w.launch_cmd.is_empty()
+                        && seen.insert((w.app_id.clone(), w.profile.clone()))
+                })
                 .collect()
         };
 
@@ -222,6 +226,7 @@ mod tests {
                 floating,
                 fullscreen: false,
                 pid: 0,
+                profile: None,
             });
         }
 
@@ -268,6 +273,142 @@ mod tests {
     }
 
     #[test]
+    fn save_dedup_distinguishes_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+
+        let mut config = Config::default();
+        config.general.session_dir = "/tmp/unused".to_string();
+        let mut state = StateManager::new(&config);
+
+        state.add(TrackedWindow {
+            address: "0xa".to_string(),
+            app_id: "firefox".to_string(),
+            launch_cmd: "firefox".to_string(),
+            workspace: "1".to_string(),
+            position: (0, 0),
+            size: (1920, 1080),
+            floating: false,
+            fullscreen: false,
+            pid: 0,
+            profile: Some("-P work".to_string()),
+        });
+        state.add(TrackedWindow {
+            address: "0xb".to_string(),
+            app_id: "firefox".to_string(),
+            launch_cmd: "firefox".to_string(),
+            workspace: "2".to_string(),
+            position: (0, 0),
+            size: (1920, 1080),
+            floating: false,
+            fullscreen: false,
+            pid: 0,
+            profile: Some("-P personal".to_string()),
+        });
+        state.add(TrackedWindow {
+            address: "0xc".to_string(),
+            app_id: "firefox".to_string(),
+            launch_cmd: "firefox".to_string(),
+            workspace: "3".to_string(),
+            position: (0, 0),
+            size: (1920, 1080),
+            floating: false,
+            fullscreen: false,
+            pid: 0,
+            profile: Some("-P work".to_string()),
+        });
+
+        engine.save(&state, "profiles").unwrap();
+        let loaded = engine.load("profiles").unwrap();
+
+        // Two distinct profiles: "-P work" and "-P personal"
+        assert_eq!(loaded.windows.len(), 2);
+        let profiles: Vec<Option<&str>> = loaded
+            .windows
+            .iter()
+            .map(|w| w.profile.as_deref())
+            .collect();
+        assert!(profiles.contains(&Some("-P work")));
+        assert!(profiles.contains(&Some("-P personal")));
+    }
+
+    #[test]
+    fn profile_field_roundtrips_through_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), true).unwrap();
+
+        let mut config = Config::default();
+        config.general.session_dir = "/tmp/unused".to_string();
+        let mut state = StateManager::new(&config);
+
+        state.add(TrackedWindow {
+            address: "0xa".to_string(),
+            app_id: "firefox".to_string(),
+            launch_cmd: "firefox".to_string(),
+            workspace: "1".to_string(),
+            position: (100, 200),
+            size: (800, 600),
+            floating: false,
+            fullscreen: false,
+            pid: 0,
+            profile: Some("-no-remote -P dev".to_string()),
+        });
+        state.add(TrackedWindow {
+            address: "0xb".to_string(),
+            app_id: "chromium".to_string(),
+            launch_cmd: "chromium".to_string(),
+            workspace: "2".to_string(),
+            position: (0, 0),
+            size: (1920, 1080),
+            floating: false,
+            fullscreen: false,
+            pid: 0,
+            profile: Some("--profile-directory=Profile 1".to_string()),
+        });
+        state.add(TrackedWindow {
+            address: "0xc".to_string(),
+            app_id: "code".to_string(),
+            launch_cmd: "code".to_string(),
+            workspace: "3".to_string(),
+            position: (0, 0),
+            size: (1920, 1080),
+            floating: false,
+            fullscreen: false,
+            pid: 0,
+            profile: None,
+        });
+
+        engine.save(&state, "profile-rt").unwrap();
+        let loaded = engine.load("profile-rt").unwrap();
+
+        assert_eq!(loaded.windows.len(), 3);
+
+        let firefox = loaded
+            .windows
+            .iter()
+            .find(|w| w.app_id == "firefox")
+            .unwrap();
+        assert_eq!(firefox.profile.as_deref(), Some("-no-remote -P dev"));
+
+        let chromium = loaded
+            .windows
+            .iter()
+            .find(|w| w.app_id == "chromium")
+            .unwrap();
+        assert_eq!(
+            chromium.profile.as_deref(),
+            Some("--profile-directory=Profile 1")
+        );
+
+        let code = loaded
+            .windows
+            .iter()
+            .find(|w| w.app_id == "code")
+            .unwrap();
+        assert!(code.profile.is_none());
+    }
+
+    #[test]
     fn save_per_window_launch_keeps_all() {
         let dir = tempfile::tempdir().unwrap();
         let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), true).unwrap();
@@ -300,6 +441,7 @@ mod tests {
             floating: false,
             fullscreen: false,
             pid: 0,
+            profile: None,
         });
 
         engine.save(&state, "empty").unwrap();
