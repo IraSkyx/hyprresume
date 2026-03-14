@@ -4,7 +4,7 @@ build:
 
 .PHONY: format
 format:
-	cargo fmt --all
+	cargo fmt --all $(FMT_FLAGS)
 
 .PHONY: lint
 lint:
