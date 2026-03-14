@@ -24,10 +24,7 @@ const TERMINAL_CWD_FLAGS: &[(&str, &str)] = &[
 
 /// Flags that force single-instance behavior via D-Bus, which prevents
 /// each launched process from being independent (breaking CWD).
-const SINGLE_INSTANCE_FLAGS: &[&str] = &[
-    "--gtk-single-instance=true",
-    "--single-instance",
-];
+const SINGLE_INSTANCE_FLAGS: &[&str] = &["--gtk-single-instance=true", "--single-instance"];
 
 pub struct RestoreEngine {
     restore_geometry: bool,
@@ -120,10 +117,7 @@ impl RestoreEngine {
                 window.workspace
             );
 
-            match self
-                .restore_window(window, ctl, events, active_rules)
-                .await
-            {
+            match self.restore_window(window, ctl, events, active_rules).await {
                 Ok(()) => {
                     report.restored += 1;
                     tracing::info!("  restored {}", window.app_id);
@@ -171,8 +165,16 @@ impl RestoreEngine {
             active_rules,
         )
         .await?;
-        self.restore_indexed(session, ctl, events, report, &floating, "float", active_rules)
-            .await?;
+        self.restore_indexed(
+            session,
+            ctl,
+            events,
+            report,
+            &floating,
+            "float",
+            active_rules,
+        )
+        .await?;
 
         Ok(())
     }
@@ -339,10 +341,7 @@ impl RestoreEngine {
                 window.app_id,
                 window.workspace
             );
-            match self
-                .restore_window(window, ctl, events, active_rules)
-                .await
-            {
+            match self.restore_window(window, ctl, events, active_rules).await {
                 Ok(()) => report.restored += 1,
                 Err(e) => {
                     report.failed += 1;
@@ -415,7 +414,9 @@ impl RestoreEngine {
         events: &mut mpsc::Receiver<HyprEvent>,
         active_rules: &mut Vec<String>,
     ) -> Result<()> {
-        let addr = self.launch_and_track(window, ctl, events, active_rules).await?;
+        let addr = self
+            .launch_and_track(window, ctl, events, active_rules)
+            .await?;
 
         let Some(addr) = addr else {
             return Ok(());
@@ -472,10 +473,10 @@ impl RestoreEngine {
 /// its own process) and appends `--working-directory=<path>`.
 /// For other apps with CWD: wraps with `cd <path> && exec <cmd>`.
 fn build_launch_cmd(window: &WindowEntry) -> String {
-    let cmd = match &window.profile {
-        Some(profile) => format!("{} {profile}", window.launch_cmd),
-        None => window.launch_cmd.clone(),
-    };
+    let cmd = window.profile.as_ref().map_or_else(
+        || window.launch_cmd.clone(),
+        |profile| format!("{} {profile}", window.launch_cmd),
+    );
 
     let Some(cwd) = window.cwd.as_deref() else {
         return cmd;
@@ -503,11 +504,7 @@ fn strip_single_instance_flags(cmd: &str) -> String {
 /// Match the binary name in a launch command against known terminals
 /// and return the appropriate `--working-directory=` style flag.
 fn terminal_cwd_flag(launch_cmd: &str) -> Option<&'static str> {
-    let bin = launch_cmd
-        .split_whitespace()
-        .next()?
-        .rsplit('/')
-        .next()?;
+    let bin = launch_cmd.split_whitespace().next()?.rsplit('/').next()?;
     TERMINAL_CWD_FLAGS
         .iter()
         .find(|(name, _)| *name == bin)
