@@ -153,6 +153,7 @@ mod tests {
                 restore_on_start: false,
                 per_window_launch: false,
                 restore_geometry: false,
+                restore_layout: true,
             },
             rules: RulesConfig {
                 exclude: exclude.into_iter().map(String::from).collect(),
