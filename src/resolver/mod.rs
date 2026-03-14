@@ -2,6 +2,7 @@ pub mod cwd;
 pub mod desktop;
 pub mod flatpak;
 pub mod proc;
+pub mod profile;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
