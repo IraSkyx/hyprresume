@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use regex::Regex;
 
 use crate::config::Config;
-use crate::models::TrackedWindow;
+use crate::models::{HyprClient, TrackedWindow};
 
 pub struct StateManager {
     windows: HashMap<String, TrackedWindow>,
@@ -101,6 +101,33 @@ impl StateManager {
         if let Some(w) = self.windows.get_mut(&key) {
             w.floating = floating;
         }
+    }
+
+    /// Update position, size, floating, and fullscreen for all tracked windows
+    /// from a fresh `j/clients` snapshot. Call before saving to ensure geometry
+    /// reflects the user's current layout (Hyprland emits no events for tiled
+    /// resize or position changes).
+    pub fn refresh_geometry(&mut self, clients: &[HyprClient]) {
+        let client_map: HashMap<String, &HyprClient> = clients
+            .iter()
+            .map(|c| (normalize_address(&c.address), c))
+            .collect();
+
+        let mut updated = 0usize;
+        for (key, window) in &mut self.windows {
+            if let Some(client) = client_map.get(key) {
+                window.position = client.at;
+                window.size = client.size;
+                window.floating = client.floating;
+                window.fullscreen = client.fullscreen_mode > 0;
+                window.workspace.clone_from(&client.workspace.name);
+                updated += 1;
+            }
+        }
+        tracing::debug!(
+            "refreshed geometry for {updated}/{} windows",
+            self.windows.len()
+        );
     }
 
     pub fn windows(&self) -> Vec<&TrackedWindow> {
