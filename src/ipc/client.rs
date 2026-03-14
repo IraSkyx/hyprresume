@@ -47,7 +47,6 @@ pub struct HyprCtl {
 }
 
 impl HyprCtl {
-    #[cfg(test)]
     pub const fn new(paths: HyprSocketPaths) -> Self {
         Self { paths }
     }
