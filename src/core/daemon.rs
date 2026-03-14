@@ -40,7 +40,7 @@ pub async fn run(config: Config) -> Result<()> {
                     config.general.restore_geometry,
                     config.general.restore_layout,
                 );
-                let report = engine.restore(&session, &ctl).await?;
+                let (report, _watcher) = engine.restore(&session, &ctl).await?;
                 if report.failed > 0 {
                     for (app, err) in &report.errors {
                         tracing::warn!("restore failed for {app}: {err}");

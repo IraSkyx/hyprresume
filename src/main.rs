@@ -174,7 +174,7 @@ async fn cmd_restore(cfg: &config::Config, name: Option<&str>) -> Result<()> {
     let session = snapshot.load(name)?;
     let engine =
         core::restore::RestoreEngine::new(cfg.general.restore_geometry, cfg.general.restore_layout);
-    let report = engine.restore(&session, &ctl).await?;
+    let (report, watcher) = engine.restore(&session, &ctl).await?;
 
     println!(
         "Restored {}/{} apps{}",
@@ -188,6 +188,11 @@ async fn cmd_restore(cfg: &config::Config, name: Option<&str>) -> Result<()> {
     );
     for (app, err) in &report.errors {
         eprintln!("  {app}: {err}");
+    }
+
+    if let Some(handle) = watcher {
+        println!("Waiting for slow-starting apps (up to 60s)...");
+        drop(handle.await);
     }
     Ok(())
 }
