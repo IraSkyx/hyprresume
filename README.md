@@ -91,7 +91,7 @@ dwindle {
 
 ## Contributing
 
-Requires Rust 1.93+ (pinned in `rust-toolchain.toml`).
+Requires Rust 1.94 (pinned in `rust-toolchain.toml`).
 
 ```sh
 git clone https://github.com/IraSkyx/hyprresume.git
