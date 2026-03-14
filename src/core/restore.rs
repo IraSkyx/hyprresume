@@ -374,8 +374,9 @@ impl RestoreEngine {
     /// and does NOT use `[workspace N silent]` since we are already on the
     /// target workspace.
     ///
-    /// If the window doesn't appear within the per-window timeout, it is
-    /// added to `pending` for the background late-window watcher to handle.
+    /// The rule is disabled immediately once the window appears so that a
+    /// subsequent window of the same class never sees a stale rule. Only
+    /// rules for timed-out windows are kept alive for the background watcher.
     async fn bsp_launch_and_track(
         &self,
         window: &WindowEntry,
@@ -402,8 +403,6 @@ impl RestoreEngine {
             window.workspace
         ))
         .await?;
-        active_rules.push(rule_name.clone());
-
         let launch_cmd = build_bsp_launch_cmd(window);
         ctl.dispatch(&format!("exec {launch_cmd}"))
             .await
@@ -411,6 +410,7 @@ impl RestoreEngine {
 
         if let Some(ref addr) = self.wait_for_open_event(events, &window.app_id).await {
             tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
+            disable_all_rules(ctl, &[rule_name]).await;
             drop(
                 ctl.dispatch(&format!(
                     "movetoworkspacesilent {},address:0x{addr}",
@@ -425,6 +425,7 @@ impl RestoreEngine {
                 window.app_id,
                 WINDOW_APPEAR_TIMEOUT.as_secs()
             );
+            active_rules.push(rule_name.clone());
             pending.push(PendingWindow {
                 app_id: window.app_id.clone(),
                 workspace: window.workspace.clone(),
@@ -437,6 +438,7 @@ impl RestoreEngine {
             Ok(None)
         }
     }
+
     async fn converge_tiled_sizes(
         &self,
         session: &SessionFile,
@@ -542,12 +544,12 @@ impl RestoreEngine {
     }
 
     /// Launch a window with workspace placement via named rules, wait for it
-    /// to appear, then return its address. Rule cleanup is deferred to the
-    /// caller so forking apps (Electron) keep their workspace rule active
-    /// until the entire restore completes.
+    /// to appear, then return its address.
     ///
-    /// If the window doesn't appear within the per-window timeout, it is
-    /// added to `pending` for the background late-window watcher to handle.
+    /// The rule is disabled immediately once the window appears so that a
+    /// subsequent window of the same class never sees a stale rule. Only
+    /// rules for timed-out windows are kept alive (pushed to `active_rules`)
+    /// for the background late-window watcher.
     async fn launch_and_track(
         &self,
         window: &WindowEntry,
@@ -572,7 +574,6 @@ impl RestoreEngine {
             window.workspace
         ))
         .await?;
-        active_rules.push(rule_name.clone());
 
         let launch_cmd = build_launch_cmd(window);
         ctl.dispatch(&format!(
@@ -584,6 +585,7 @@ impl RestoreEngine {
 
         if let Some(ref addr) = self.wait_for_open_event(events, &window.app_id).await {
             tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
+            disable_all_rules(ctl, &[rule_name]).await;
             drop(
                 ctl.dispatch(&format!(
                     "movetoworkspacesilent {},address:0x{addr}",
@@ -598,6 +600,7 @@ impl RestoreEngine {
                 window.app_id,
                 WINDOW_APPEAR_TIMEOUT.as_secs()
             );
+            active_rules.push(rule_name.clone());
             pending.push(PendingWindow {
                 app_id: window.app_id.clone(),
                 workspace: window.workspace.clone(),
