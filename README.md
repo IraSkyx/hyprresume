@@ -5,7 +5,7 @@ Session persistence for [Hyprland](https://hyprland.org). Saves your open applic
 - Resolves launch commands from `.desktop` files, Flatpak cgroups or `/proc`
 - Saves sessions as human-readable TOML
 - Restores apps to their original workspaces with floating window geometry
-- Tiling layout reconstruction is experimental
+- Reconstructs tiling layouts by inferring the BSP tree from saved window positions (dwindle layout only)
 
 ## Install
 
@@ -69,6 +69,24 @@ exclude = [
 ```
 
 A full example config is in [`assets/hyprresume.toml`](assets/hyprresume.toml).
+
+### Tiling layout restoration
+
+When `restore_layout` is enabled (the default), hyprresume saves every tiled window's position and size and reconstructs the layout on restore. It does this by:
+
+1. Inferring a BSP (Binary Space Partition) tree from the saved window geometry
+2. Replaying the tree via `layoutmsg preselect` to recreate the split structure
+3. Iteratively resizing windows with `resizewindowpixel` to match saved proportions
+
+**This requires the dwindle layout.** Dwindle is a BSP layout where `preselect` controls where the next window opens. The master layout uses a fundamentally different model and is not supported, windows will still be restored to the correct workspaces but tiling positions will fall back to default placement.
+
+Your Hyprland config should include `preserve_split = true` so that split directions are stable:
+
+```conf
+dwindle {
+    preserve_split = true
+}
+```
 
 ## Contributing
 

@@ -31,3 +31,9 @@ exclude = [
 # Manual class → launch command mappings (overrides auto-detection)
 # "app.zen_browser.zen" = "flatpak run app.zen_browser.zen"
 # "steam_app_.*" = ""  # empty string = skip this class
+
+[experimental]
+# Reconstruct tiling layout from saved window positions (dwindle layout only).
+# When disabled, windows are restored to the correct workspace but rely on
+# Hyprland's default placement instead of matching the original split structure.
+restore_layout = true
