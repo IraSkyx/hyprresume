@@ -28,13 +28,12 @@ pub struct GeneralConfig {
     pub per_window_launch: bool,
     #[serde(default = "default_true")]
     pub restore_geometry: bool,
+    #[serde(default = "default_true")]
+    pub restore_layout: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ExperimentalConfig {
-    #[serde(default)]
-    pub restore_layout: bool,
-}
+pub struct ExperimentalConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RulesConfig {
@@ -80,6 +79,7 @@ impl Config {
             restore_on_start: true,
             per_window_launch: true,
             restore_geometry: true,
+            restore_layout: true,
         }
     }
 
@@ -140,7 +140,7 @@ mod tests {
         assert!(cfg.general.restore_on_start);
         assert!(cfg.general.per_window_launch);
         assert!(cfg.general.restore_geometry);
-        assert!(!cfg.experimental.restore_layout);
+        assert!(cfg.general.restore_layout);
         assert!(!cfg.rules.exclude.is_empty());
         assert!(cfg.rules.include.is_empty());
         assert!(cfg.overrides.is_empty());
@@ -196,6 +196,7 @@ session_dir = "/tmp/my-sessions"
 restore_on_start = false
 per_window_launch = true
 restore_geometry = false
+restore_layout = true
 
 [rules]
 exclude = ["^steam.*", "^lutris.*"]
@@ -204,9 +205,6 @@ include = ["^firefox$"]
 [overrides]
 "app.zen_browser.zen" = "flatpak run app.zen_browser.zen"
 "steam_app_.*" = ""
-
-[experimental]
-restore_layout = true
 "#,
         )
         .unwrap();
@@ -217,7 +215,7 @@ restore_layout = true
         assert!(!cfg.general.restore_on_start);
         assert!(cfg.general.per_window_launch);
         assert!(!cfg.general.restore_geometry);
-        assert!(cfg.experimental.restore_layout);
+        assert!(cfg.general.restore_layout);
         assert_eq!(cfg.rules.exclude.len(), 2);
         assert_eq!(cfg.rules.include.len(), 1);
         assert_eq!(cfg.overrides.len(), 2);
