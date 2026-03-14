@@ -73,30 +73,19 @@ pub async fn run(config: Config) -> Result<()> {
             }
 
             _ = save_timer.tick() => {
-                let state = state.lock().await;
-                if state.window_count() > 0
-                    && let Err(e) = snapshot.save(&state, "last")
-                {
-                    tracing::error!("periodic save failed: {e}");
-                }
+                save_with_refresh(&state, &snapshot, &ctl, "periodic").await;
             }
 
             Some(sig) = futures::StreamExt::next(&mut signals) => {
                 match sig {
                     SIGTERM | SIGINT => {
                         tracing::info!("received signal {sig}, saving and exiting...");
-                        let state = state.lock().await;
-                        if let Err(e) = snapshot.save(&state, "last") {
-                            tracing::error!("final save failed: {e}");
-                        }
+                        save_with_refresh(&state, &snapshot, &ctl, "final").await;
                         break;
                     }
                     SIGUSR1 => {
                         tracing::info!("received SIGUSR1, saving session...");
-                        let state = state.lock().await;
-                        if let Err(e) = snapshot.save(&state, "last") {
-                            tracing::error!("manual save failed: {e}");
-                        }
+                        save_with_refresh(&state, &snapshot, &ctl, "manual").await;
                     }
                     _ => {}
                 }
@@ -104,10 +93,7 @@ pub async fn run(config: Config) -> Result<()> {
 
             else => {
                 tracing::info!("event stream ended, saving final session...");
-                let state = state.lock().await;
-                if let Err(e) = snapshot.save(&state, "last") {
-                    tracing::error!("final save failed: {e}");
-                }
+                save_with_refresh(&state, &snapshot, &ctl, "final").await;
                 break;
             }
         }
@@ -116,6 +102,30 @@ pub async fn run(config: Config) -> Result<()> {
     event_handle.abort();
     tracing::info!("daemon stopped");
     Ok(())
+}
+
+/// Refresh window geometry from Hyprland and save. Hyprland emits no events
+/// for tiled resize/position changes, so we must re-query before every save
+/// to capture the user's actual layout.
+async fn save_with_refresh(
+    state: &Arc<Mutex<StateManager>>,
+    snapshot: &SnapshotEngine,
+    ctl: &HyprCtl,
+    label: &str,
+) {
+    let mut state = state.lock().await;
+    if state.window_count() == 0 {
+        return;
+    }
+    match ctl.get_clients().await {
+        Ok(clients) => state.refresh_geometry(&clients),
+        Err(e) => tracing::warn!("{label} save: failed to refresh geometry: {e}"),
+    }
+    let save_result = snapshot.save(&state, "last");
+    drop(state);
+    if let Err(e) = save_result {
+        tracing::error!("{label} save failed: {e}");
+    }
 }
 
 /// Drain events until there's a 1-second gap, indicating the compositor
