@@ -11,7 +11,7 @@ makedepends=('cargo' 'mold')
 install=$pkgname.install
 options=(!debug)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('081466df370688969c7d51d86df3e340a0edf00f0d50c7dc1210877820a9675d')
+sha256sums=('7837dfae4fa08019d49e44a1a594d61a1b481887438652ae8515f8204fb7a6db')
 
 prepare() {
     cd "$pkgname-$pkgver"
