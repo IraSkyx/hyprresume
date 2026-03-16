@@ -7,6 +7,8 @@ pub struct TrackedWindow {
     pub launch_cmd: String,
     pub workspace: String,
     #[serde(default)]
+    pub monitor: String,
+    #[serde(default)]
     pub position: (i32, i32),
     #[serde(default)]
     pub size: (i32, i32),
@@ -37,6 +39,8 @@ pub struct WindowEntry {
     pub app_id: String,
     pub launch_cmd: String,
     pub workspace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<String>,
     #[serde(default)]
     pub floating: bool,
     #[serde(default)]
@@ -58,6 +62,8 @@ pub struct HyprClient {
     pub class: String,
     pub pid: i64,
     pub workspace: HyprWorkspace,
+    #[serde(default)]
+    pub monitor: i64,
     pub at: (i32, i32),
     pub size: (i32, i32),
     #[serde(default)]
@@ -68,6 +74,13 @@ pub struct HyprClient {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HyprWorkspace {
+    pub name: String,
+}
+
+/// Raw monitor data from `hyprctl monitors -j`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HyprMonitor {
+    pub id: i64,
     pub name: String,
 }
 
@@ -120,6 +133,7 @@ mod tests {
                     app_id: "firefox".to_string(),
                     launch_cmd: "firefox".to_string(),
                     workspace: "1".to_string(),
+                    monitor: None,
                     floating: false,
                     fullscreen: false,
                     position: None,
@@ -131,6 +145,7 @@ mod tests {
                     app_id: "nautilus".to_string(),
                     launch_cmd: "nautilus".to_string(),
                     workspace: "2".to_string(),
+                    monitor: None,
                     floating: true,
                     fullscreen: false,
                     position: Some((200, 150)),
@@ -277,6 +292,7 @@ workspace = "1"
             app_id: "firefox".to_string(),
             launch_cmd: "firefox".to_string(),
             workspace: "1".to_string(),
+            monitor: "DP-1".to_string(),
             position: (100, 200),
             size: (1920, 1080),
             floating: true,

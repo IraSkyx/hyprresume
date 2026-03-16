@@ -134,17 +134,20 @@ async fn cmd_save(cfg: &config::Config, name: Option<&str>) -> Result<()> {
     let mut state = core::state::StateManager::new(cfg);
 
     let clients = ctl.get_clients().await?;
+    let monitor_map = ctl.get_monitor_map().await.unwrap_or_default();
     for c in clients {
         if !state.should_track(&c.class) {
             continue;
         }
         let launch_cmd = resolver.resolve(&c.class, c.pid).unwrap_or_default();
         let profile = resolver::profile::detect_browser_profile(c.pid);
+        let monitor = monitor_map.get(&c.monitor).cloned().unwrap_or_default();
         state.add(models::TrackedWindow {
             address: c.address,
             app_id: c.class,
             launch_cmd,
             workspace: c.workspace.name,
+            monitor,
             position: c.at,
             size: c.size,
             floating: c.floating,

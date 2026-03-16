@@ -1,9 +1,11 @@
-use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use crate::models::HyprClient;
+use crate::models::{HyprClient, HyprMonitor};
 
 /// Resolved Hyprland socket paths for a running instance.
 #[derive(Debug, Clone)]
@@ -88,6 +90,16 @@ impl HyprCtl {
 
     pub async fn keyword(&self, args: &str) -> Result<String> {
         self.plain(&format!("keyword {args}")).await
+    }
+
+    pub async fn get_monitors(&self) -> Result<Vec<HyprMonitor>> {
+        let raw = self.json("monitors").await?;
+        serde_json::from_str(&raw).context("parsing hyprctl monitors JSON")
+    }
+
+    pub async fn get_monitor_map(&self) -> Result<HashMap<i64, String>> {
+        let monitors = self.get_monitors().await?;
+        Ok(monitors.into_iter().map(|m| (m.id, m.name)).collect())
     }
 
     pub async fn get_option(&self, name: &str) -> Result<bool> {

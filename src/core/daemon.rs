@@ -117,8 +117,9 @@ async fn save_with_refresh(
     if state.window_count() == 0 {
         return;
     }
+    let monitor_map = ctl.get_monitor_map().await.unwrap_or_default();
     match ctl.get_clients().await {
-        Ok(clients) => state.refresh_geometry(&clients),
+        Ok(clients) => state.refresh_geometry(&clients, &monitor_map),
         Err(e) => tracing::warn!("{label} save: failed to refresh geometry: {e}"),
     }
     let save_result = snapshot.save(&state, "last");
@@ -142,6 +143,7 @@ async fn populate_initial_state(
     ctl: &HyprCtl,
 ) -> Result<()> {
     let clients = ctl.get_clients().await?;
+    let monitor_map = ctl.get_monitor_map().await.unwrap_or_default();
     let mut state = state.lock().await;
 
     for c in clients {
@@ -151,12 +153,14 @@ async fn populate_initial_state(
 
         let launch_cmd = resolver.resolve(&c.class, c.pid).unwrap_or_default();
         let profile = crate::resolver::profile::detect_browser_profile(c.pid);
+        let monitor = monitor_map.get(&c.monitor).cloned().unwrap_or_default();
 
         state.add(crate::models::TrackedWindow {
             address: c.address,
             app_id: c.class,
             launch_cmd,
             workspace: c.workspace.name,
+            monitor,
             position: c.at,
             size: c.size,
             floating: c.floating,
@@ -209,6 +213,7 @@ async fn handle_event(
                 app_id: class,
                 launch_cmd,
                 workspace,
+                monitor: String::new(),
                 position,
                 size,
                 floating,
