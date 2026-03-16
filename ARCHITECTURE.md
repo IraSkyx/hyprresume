@@ -58,7 +58,7 @@ Results are cached per window class.
 - **State** (`state.rs`): in-memory `HashMap<address, TrackedWindow>` updated by events.
 - **Snapshot** (`snapshot.rs`): serializes state to TOML, atomic writes via temp file + rename.
 - **Restore** (`restore.rs`): injects temporary window rules then dispatches `exec` per app.
-- **Layout** (`layout.rs`): infers BSP tree from saved window geometry for tiled layout reconstruction (dwindle only).
+- **Layout** (`layout/`): infers tiling structure from saved window geometry. Shared helpers in `mod.rs`, with `dwindle.rs` (BSP tree inference, preselect planning, split ratios) and `master.rs` (orientation, mfact, master/stack partitioning).
 - **Daemon** (`daemon.rs`): main loop, connects event listener, runs periodic saves, handles signals.
 
 ### Config (`src/config.rs`)
@@ -91,7 +91,10 @@ src/
 │   ├── state.rs         # In-memory session state
 │   ├── snapshot.rs      # Save/load sessions
 │   ├── restore.rs       # Restore sessions
-│   └── layout.rs        # BSP layout inference (dwindle only)
+│   └── layout/
+│       ├── mod.rs       # Shared geometry types and helpers
+│       ├── dwindle.rs   # BSP tree inference + preselect planning
+│       └── master.rs    # Master orientation + mfact inference
 ├── resolver/
 │   ├── mod.rs           # Resolution chain + cache
 │   ├── desktop.rs       # XDG .desktop indexer

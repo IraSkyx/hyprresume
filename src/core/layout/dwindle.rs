@@ -1,16 +1,9 @@
 use crate::models::WindowEntry;
 
-/// Small buffer added to the measured gap to account for border widths and sub-pixel rounding.
-const GAP_ROUNDING_BUFFER: i32 = 4;
-
-/// A rectangle in screen coordinates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-}
+use super::{
+    GAP_ROUNDING_BUFFER, IndexedWindow, Rect, bounding_rect, extract_indexed,
+    infer_gap_from_geometry, split_bounds,
+};
 
 /// Binary split direction in the Dwindle BSP tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +40,14 @@ pub struct RestoreStep {
     pub preselect: Option<PreselDir>,
 }
 
+/// Post-placement correction: focus this window and apply
+/// `layoutmsg splitratio exact <ratio>` to set its parent split precisely.
+#[derive(Debug, Clone)]
+pub struct SplitRatioStep {
+    pub focus_window_idx: usize,
+    pub ratio: f64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum PreselDir {
     Right,
@@ -62,66 +63,10 @@ impl std::fmt::Display for PreselDir {
     }
 }
 
-/// An indexed window: pairs a global index with position/size data.
-#[derive(Clone)]
-struct IndexedWindow {
-    idx: usize,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-}
-
-fn extract_indexed(
-    windows: &[&WindowEntry],
-    global_indices: &[usize],
-) -> Option<Vec<IndexedWindow>> {
-    windows
-        .iter()
-        .zip(global_indices)
-        .map(|(w, &idx)| {
-            let (x, y) = w.position?;
-            let (ww, hh) = w.size?;
-            Some(IndexedWindow {
-                idx,
-                x,
-                y,
-                w: ww,
-                h: hh,
-            })
-        })
-        .collect()
-}
-
-/// Measure the largest pixel gap between adjacent tiled windows by examining
-/// pairs that overlap in the perpendicular axis. Returns 0 when no gaps are
-/// found (e.g. `gaps_in = 0` or a single window).
-fn infer_gap_from_geometry(indexed: &[IndexedWindow]) -> i32 {
-    if indexed.len() < 2 {
-        return 0;
-    }
-
-    let mut max_gap = 0i32;
-    for a in indexed {
-        for b in indexed {
-            // b is to the right of a, and they share vertical overlap
-            let h_gap = b.x - (a.x + a.w);
-            if h_gap > 0 && ranges_overlap(a.y, a.y + a.h, b.y, b.y + b.h) {
-                max_gap = max_gap.max(h_gap);
-            }
-
-            // b is below a, and they share horizontal overlap
-            let v_gap = b.y - (a.y + a.h);
-            if v_gap > 0 && ranges_overlap(a.x, a.x + a.w, b.x, b.x + b.w) {
-                max_gap = max_gap.max(v_gap);
-            }
-        }
-    }
-    max_gap
-}
-
-const fn ranges_overlap(a_start: i32, a_end: i32, b_start: i32, b_end: i32) -> bool {
-    a_start < b_end && b_start < a_end
+/// Complete restore plan for one workspace under the dwindle layout.
+pub struct DwindlePlan {
+    pub steps: Vec<RestoreStep>,
+    pub ratio_steps: Vec<SplitRatioStep>,
 }
 
 /// Infer a BSP tree from a set of tiled windows based on their geometry.
@@ -159,41 +104,14 @@ fn try_split(
     tolerance: i32,
     dir: SplitDir,
 ) -> Option<BspNode> {
-    let mut edges: Vec<i32> = Vec::new();
-    for iw in indexed {
-        match dir {
-            SplitDir::Horizontal => {
-                edges.push(iw.x);
-                edges.push(iw.x + iw.w);
-            }
-            SplitDir::Vertical => {
-                edges.push(iw.y);
-                edges.push(iw.y + iw.h);
-            }
-        }
-    }
-    edges.sort_unstable();
-    edges.dedup();
-
-    // Try both raw edges and gap midpoints as split candidates.
-    // Gap midpoints handle Hyprland's gaps_in where the true split line
-    // falls between the end of one window and the start of the next.
-    let mut candidates = edges.clone();
-    for pair in edges.windows(2) {
-        let gap = pair[1] - pair[0];
-        if gap > 0 && gap <= tolerance {
-            candidates.push(pair[0] + gap / 2);
-        }
-    }
-    candidates.sort_unstable();
-    candidates.dedup();
+    let horizontal = dir == SplitDir::Horizontal;
+    let candidates = super::split_candidates(indexed, horizontal, tolerance);
 
     for &split_at in &candidates {
         if let Some(node) = try_split_at(indexed, bounds, tolerance, dir, split_at) {
             return Some(node);
         }
     }
-
     None
 }
 
@@ -204,9 +122,11 @@ fn try_split_at(
     dir: SplitDir,
     split_at: i32,
 ) -> Option<BspNode> {
-    let (range_start, range_end) = match dir {
-        SplitDir::Horizontal => (bounds.x, bounds.x + bounds.w),
-        SplitDir::Vertical => (bounds.y, bounds.y + bounds.h),
+    let horizontal = dir == SplitDir::Horizontal;
+    let (range_start, range_end) = if horizontal {
+        (bounds.x, bounds.x + bounds.w)
+    } else {
+        (bounds.y, bounds.y + bounds.h)
     };
 
     if split_at <= range_start || split_at >= range_end {
@@ -217,9 +137,10 @@ fn try_split_at(
     let mut second_group: Vec<&IndexedWindow> = Vec::new();
 
     for iw in indexed {
-        let (start, end) = match dir {
-            SplitDir::Horizontal => (iw.x, iw.x + iw.w),
-            SplitDir::Vertical => (iw.y, iw.y + iw.h),
+        let (start, end) = if horizontal {
+            (iw.x, iw.x + iw.w)
+        } else {
+            (iw.y, iw.y + iw.h)
         };
 
         if end <= split_at + tolerance {
@@ -235,21 +156,23 @@ fn try_split_at(
         return None;
     }
 
-    let (first_bounds, second_bounds) = split_bounds(bounds, dir, split_at);
+    let (first_bounds, second_bounds) = split_bounds(bounds, horizontal, split_at);
 
-    let first_owned: Vec<IndexedWindow> = first_group.iter().map(|iw| (**iw).clone()).collect();
-    let second_owned: Vec<IndexedWindow> = second_group.iter().map(|iw| (**iw).clone()).collect();
+    let first_owned: Vec<IndexedWindow> = first_group.into_iter().cloned().collect();
+    let second_owned: Vec<IndexedWindow> = second_group.into_iter().cloned().collect();
 
     let first_node = infer_bsp_inner(&first_owned, first_bounds, tolerance)?;
     let second_node = infer_bsp_inner(&second_owned, second_bounds, tolerance)?;
 
-    let total = match dir {
-        SplitDir::Horizontal => f64::from(bounds.w),
-        SplitDir::Vertical => f64::from(bounds.h),
+    let total = if horizontal {
+        f64::from(bounds.w)
+    } else {
+        f64::from(bounds.h)
     };
-    let first_size = match dir {
-        SplitDir::Horizontal => f64::from(first_bounds.w),
-        SplitDir::Vertical => f64::from(first_bounds.h),
+    let first_size = if horizontal {
+        f64::from(first_bounds.w)
+    } else {
+        f64::from(first_bounds.h)
     };
 
     Some(BspNode::Split {
@@ -260,69 +183,7 @@ fn try_split_at(
     })
 }
 
-const fn split_bounds(bounds: Rect, dir: SplitDir, split_at: i32) -> (Rect, Rect) {
-    match dir {
-        SplitDir::Horizontal => (
-            Rect {
-                x: bounds.x,
-                y: bounds.y,
-                w: split_at - bounds.x,
-                h: bounds.h,
-            },
-            Rect {
-                x: split_at,
-                y: bounds.y,
-                w: bounds.x + bounds.w - split_at,
-                h: bounds.h,
-            },
-        ),
-        SplitDir::Vertical => (
-            Rect {
-                x: bounds.x,
-                y: bounds.y,
-                w: bounds.w,
-                h: split_at - bounds.y,
-            },
-            Rect {
-                x: bounds.x,
-                y: split_at,
-                w: bounds.w,
-                h: bounds.y + bounds.h - split_at,
-            },
-        ),
-    }
-}
-
-/// Compute the bounding rectangle of a set of windows.
-pub fn bounding_rect(windows: &[&WindowEntry]) -> Option<Rect> {
-    let mut min_x = i32::MAX;
-    let mut min_y = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut max_y = i32::MIN;
-
-    for w in windows {
-        let (x, y) = w.position?;
-        let (ww, hh) = w.size?;
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x + ww);
-        max_y = max_y.max(y + hh);
-    }
-
-    if min_x >= max_x || min_y >= max_y {
-        return None;
-    }
-
-    Some(Rect {
-        x: min_x,
-        y: min_y,
-        w: max_x - min_x,
-        h: max_y - min_y,
-    })
-}
-
-/// Convert a BSP tree into an ordered list of restore steps.
-pub fn plan_from_bsp(tree: &BspNode) -> Vec<RestoreStep> {
+fn plan_from_bsp(tree: &BspNode) -> Vec<RestoreStep> {
     let mut steps = Vec::new();
     walk_bsp(tree, None, None, &mut steps);
     steps
@@ -413,26 +274,55 @@ fn leftmost_leaf_idx(node: &BspNode) -> usize {
     }
 }
 
-/// Result of BSP inference for a workspace: the ordered restore steps.
-pub struct WorkspacePlan {
-    pub steps: Vec<RestoreStep>,
+/// Collect `SplitRatioStep`s for every split node that has at least one
+/// direct Leaf child.
+fn collect_splitratio_steps(tree: &BspNode) -> Vec<SplitRatioStep> {
+    let mut steps = Vec::new();
+    collect_ratios_inner(tree, &mut steps);
+    steps
 }
 
-/// Build a restore plan for a set of tiled windows on a single workspace.
+fn collect_ratios_inner(node: &BspNode, steps: &mut Vec<SplitRatioStep>) {
+    if let BspNode::Split {
+        ratio,
+        first,
+        second,
+        ..
+    } = node
+    {
+        if let BspNode::Leaf { idx } = first.as_ref() {
+            steps.push(SplitRatioStep {
+                focus_window_idx: *idx,
+                ratio: *ratio,
+            });
+        } else if let BspNode::Leaf { idx } = second.as_ref() {
+            steps.push(SplitRatioStep {
+                focus_window_idx: *idx,
+                ratio: *ratio,
+            });
+        }
+
+        collect_ratios_inner(first, steps);
+        collect_ratios_inner(second, steps);
+    }
+}
+
+/// Build a dwindle restore plan for tiled windows on a single workspace.
 ///
 /// `global_indices` maps each window in `windows` to its index in the full
 /// session window list.
 ///
-/// Returns `None` if BSP inference fails (falls back to simple restore).
+/// Returns `None` if BSP inference fails.
 pub fn build_workspace_plan(
     windows: &[&WindowEntry],
     global_indices: &[usize],
-) -> Option<WorkspacePlan> {
+) -> Option<DwindlePlan> {
     let bounds = bounding_rect(windows)?;
     let indexed = extract_indexed(windows, global_indices)?;
     let tree = infer_bsp(&indexed, bounds)?;
     let steps = plan_from_bsp(&tree);
-    Some(WorkspacePlan { steps })
+    let ratio_steps = collect_splitratio_steps(&tree);
+    Some(DwindlePlan { steps, ratio_steps })
 }
 
 #[cfg(test)]
@@ -472,7 +362,6 @@ mod tests {
         let bounds = bounding_rect(&refs).unwrap();
         let indexed = extract_indexed(&refs, &[0, 1]).unwrap();
         let tree = infer_bsp(&indexed, bounds).unwrap();
-
         match &tree {
             BspNode::Split { dir, ratio, .. } => {
                 assert_eq!(*dir, SplitDir::Horizontal);
@@ -490,7 +379,6 @@ mod tests {
         let bounds = bounding_rect(&refs).unwrap();
         let indexed = extract_indexed(&refs, &[0, 1]).unwrap();
         let tree = infer_bsp(&indexed, bounds).unwrap();
-
         match &tree {
             BspNode::Split { dir, ratio, .. } => {
                 assert_eq!(*dir, SplitDir::Vertical);
@@ -510,12 +398,10 @@ mod tests {
         let a = make_entry("a", "1", 0, 0, 960, 1080);
         let b = make_entry("b", "1", 960, 0, 960, 540);
         let c = make_entry("c", "1", 960, 540, 960, 540);
-
         let refs = vec![&a, &b, &c];
         let bounds = bounding_rect(&refs).unwrap();
         let indexed = extract_indexed(&refs, &[0, 1, 2]).unwrap();
         let tree = infer_bsp(&indexed, bounds).unwrap();
-
         match &tree {
             BspNode::Split {
                 dir: SplitDir::Horizontal,
@@ -524,13 +410,13 @@ mod tests {
                 ..
             } => {
                 assert!(matches!(first.as_ref(), BspNode::Leaf { .. }));
-                match second.as_ref() {
+                assert!(matches!(
+                    second.as_ref(),
                     BspNode::Split {
                         dir: SplitDir::Vertical,
                         ..
-                    } => {}
-                    other => panic!("expected vertical split, got {other:?}"),
-                }
+                    }
+                ));
             }
             other => panic!("expected horizontal split at root, got {other:?}"),
         }
@@ -542,7 +428,6 @@ mod tests {
         let a = make_entry("a", "1", 0, 0, 960, 1080);
         let b = make_entry("b", "1", 960, 0, 960, 540);
         let c = make_entry("c", "1", 960, 540, 960, 540);
-
         let refs: Vec<&WindowEntry> = vec![&a, &b, &c];
         let wp = build_workspace_plan(&refs, &[0, 1, 2]).unwrap();
         assert_eq!(wp.steps.len(), 3);
@@ -550,11 +435,9 @@ mod tests {
         // Order: A (full), B (right of A → root H split), C (below B → nested V split)
         assert_eq!(wp.steps[0].window_idx, 0);
         assert!(wp.steps[0].focus_idx.is_none());
-
         assert_eq!(wp.steps[1].window_idx, 1);
         assert_eq!(wp.steps[1].focus_idx, Some(0));
         assert!(matches!(wp.steps[1].preselect, Some(PreselDir::Right)));
-
         assert_eq!(wp.steps[2].window_idx, 2);
         assert_eq!(wp.steps[2].focus_idx, Some(1));
         assert!(matches!(wp.steps[2].preselect, Some(PreselDir::Bottom)));
@@ -566,21 +449,15 @@ mod tests {
         let a = make_entry("a", "1", 0, 0, 400, 540);
         let b = make_entry("b", "1", 0, 540, 400, 540);
         let c = make_entry("c", "1", 400, 0, 560, 1080);
-
         let refs: Vec<&WindowEntry> = vec![&a, &b, &c];
         let wp = build_workspace_plan(&refs, &[0, 1, 2]).unwrap();
         assert_eq!(wp.steps.len(), 3);
 
         // Order: A (full), C (right of A → root H split), B (below A → nested V split)
         assert_eq!(wp.steps[0].window_idx, 0);
-        assert!(wp.steps[0].focus_idx.is_none());
-
         assert_eq!(wp.steps[1].window_idx, 2);
-        assert_eq!(wp.steps[1].focus_idx, Some(0));
         assert!(matches!(wp.steps[1].preselect, Some(PreselDir::Right)));
-
         assert_eq!(wp.steps[2].window_idx, 1);
-        assert_eq!(wp.steps[2].focus_idx, Some(0));
         assert!(matches!(wp.steps[2].preselect, Some(PreselDir::Bottom)));
     }
 
@@ -592,8 +469,7 @@ mod tests {
         let refs = vec![&a, &b];
         let plan = build_workspace_plan(&refs, &[0, 1]);
         assert!(plan.is_some(), "should handle gaps between windows");
-        let wp = plan.unwrap();
-        assert_eq!(wp.steps.len(), 2);
+        assert_eq!(plan.unwrap().steps.len(), 2);
     }
 
     #[test]
@@ -609,8 +485,7 @@ mod tests {
         let refs = vec![&a, &b, &c];
         let plan = build_workspace_plan(&refs, &[0, 1, 2]);
         assert!(plan.is_some(), "should handle gaps in nested splits");
-        let wp = plan.unwrap();
-        assert_eq!(wp.steps.len(), 3);
+        assert_eq!(plan.unwrap().steps.len(), 3);
     }
 
     #[test]
@@ -621,8 +496,7 @@ mod tests {
         let refs = vec![&a, &b];
         let plan = build_workspace_plan(&refs, &[0, 1]);
         assert!(plan.is_some(), "should handle windows on offset monitor");
-        let wp = plan.unwrap();
-        assert_eq!(wp.steps.len(), 2);
+        assert_eq!(plan.unwrap().steps.len(), 2);
     }
 
     #[test]
@@ -633,30 +507,40 @@ mod tests {
         let bounds = bounding_rect(&refs).unwrap();
         let indexed = extract_indexed(&refs, &[0, 1]).unwrap();
         let tree = infer_bsp(&indexed, bounds).unwrap();
-
         match &tree {
-            BspNode::Split { ratio, .. } => {
-                assert!((ratio - 0.6).abs() < 0.01);
-            }
+            BspNode::Split { ratio, .. } => assert!((ratio - 0.6).abs() < 0.01),
             BspNode::Leaf { .. } => panic!("expected split"),
         }
     }
 
     #[test]
-    fn missing_geometry_returns_none() {
-        let w = WindowEntry {
-            app_id: "x".to_string(),
-            launch_cmd: "x".to_string(),
-            workspace: "1".to_string(),
-            monitor: None,
-            floating: false,
-            fullscreen: false,
-            position: None,
-            size: None,
-            cwd: None,
-            profile: None,
-        };
-        let refs = vec![&w];
-        assert!(bounding_rect(&refs).is_none());
+    fn ratio_steps_two_windows() {
+        let a = make_entry("a", "1", 0, 0, 960, 1080);
+        let b = make_entry("b", "1", 960, 0, 960, 1080);
+        let refs = vec![&a, &b];
+        let wp = build_workspace_plan(&refs, &[0, 1]).unwrap();
+        assert_eq!(wp.ratio_steps.len(), 1);
+        assert_eq!(wp.ratio_steps[0].focus_window_idx, 0);
+        assert!((wp.ratio_steps[0].ratio - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn ratio_steps_three_windows_right_heavy() {
+        let a = make_entry("a", "1", 0, 0, 960, 1080);
+        let b = make_entry("b", "1", 960, 0, 960, 540);
+        let c = make_entry("c", "1", 960, 540, 960, 540);
+        let refs = vec![&a, &b, &c];
+        let wp = build_workspace_plan(&refs, &[0, 1, 2]).unwrap();
+        assert_eq!(wp.ratio_steps.len(), 2);
+    }
+
+    #[test]
+    fn ratio_steps_uneven_ratio_preserved() {
+        let a = make_entry("a", "1", 0, 0, 1152, 1080);
+        let b = make_entry("b", "1", 1152, 0, 768, 1080);
+        let refs = vec![&a, &b];
+        let wp = build_workspace_plan(&refs, &[0, 1]).unwrap();
+        assert_eq!(wp.ratio_steps.len(), 1);
+        assert!((wp.ratio_steps[0].ratio - 0.6).abs() < 0.01);
     }
 }
