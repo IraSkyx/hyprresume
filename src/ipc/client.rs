@@ -106,4 +106,19 @@ impl HyprCtl {
         let raw = self.plain(&format!("getoption {name}")).await?;
         Ok(raw.contains("int: 1"))
     }
+
+    pub async fn get_option_str(&self, name: &str) -> Result<String> {
+        let raw = self.plain(&format!("getoption {name}")).await?;
+        for line in raw.lines() {
+            if let Some(val) = line.strip_prefix("str: ") {
+                return Ok(val.trim().trim_matches('"').to_string());
+            }
+        }
+        anyhow::bail!("no str value in getoption response for {name}")
+    }
+
+    /// Query the active tiling layout (e.g. "dwindle", "master").
+    pub async fn get_layout(&self) -> Result<String> {
+        self.get_option_str("general:layout").await
+    }
 }

@@ -17,7 +17,7 @@ per_window_launch = false
 # Restore floating window position and size
 restore_geometry = true
 
-# Reconstruct tiling layout from saved window positions (dwindle layout only).
+# Reconstruct tiling layout from saved window positions (dwindle and master).
 # When disabled, windows are restored to the correct workspace but use
 # Hyprland's default placement instead of matching the original splits.
 restore_layout = true

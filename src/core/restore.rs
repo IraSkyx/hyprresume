@@ -5,7 +5,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::core::layout::{self, WorkspacePlan};
+use crate::core::layout::dwindle::{self, DwindlePlan};
+use crate::core::layout::master::{self, MasterPlan};
 use crate::ipc::client::HyprCtl;
 use crate::ipc::event_listener::parse_event;
 use crate::models::{HyprEvent, SessionFile, WindowEntry};
@@ -16,6 +17,7 @@ const WINDOW_APPEAR_TIMEOUT: Duration = Duration::from_secs(15);
 /// after the main restore loop finishes.
 const LATE_WINDOW_GRACE_PERIOD: Duration = Duration::from_secs(60);
 
+/// Known terminal working-directory flags, keyed by binary name.
 /// Known terminal working-directory flags, keyed by binary name.
 const TERMINAL_CWD_FLAGS: &[(&str, &str)] = &[
     ("ghostty", "--working-directory="),
@@ -31,6 +33,8 @@ const TERMINAL_CWD_FLAGS: &[(&str, &str)] = &[
 /// each launched process from being independent (breaking CWD).
 const SINGLE_INSTANCE_FLAGS: &[&str] = &["--gtk-single-instance=true", "--single-instance"];
 
+/// A window that was launched but didn't appear within the per-window timeout.
+/// Handed off to the background watcher for deferred placement.
 /// A window that was launched but didn't appear within the per-window timeout.
 /// Handed off to the background watcher for deferred placement.
 struct PendingWindow {
@@ -201,12 +205,16 @@ impl RestoreEngine {
         Ok(())
     }
 
-    /// Restore windows using BSP tree inference to reconstruct tiling layouts.
+    /// Restore windows using layout-aware strategies.
     ///
-    /// Groups tiled windows by workspace, infers the BSP tree from their saved
-    /// geometry, then opens them in the correct order with `layoutmsg preselect`
-    /// to reproduce the exact split structure. Floating windows are restored
-    /// normally with exact geometry.
+    /// Auto-detects the active Hyprland layout (dwindle, master, ...) and
+    /// dispatches to the appropriate strategy. Falls back to simple restore
+    /// for unknown layouts.
+    /// Restore windows using layout-aware strategies.
+    ///
+    /// Auto-detects the active Hyprland layout (dwindle, master, ...) and
+    /// dispatches to the appropriate strategy. Falls back to simple restore
+    /// for unknown layouts.
     async fn restore_with_layout(
         &self,
         session: &SessionFile,
@@ -216,7 +224,40 @@ impl RestoreEngine {
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
     ) -> Result<()> {
-        let (floating, ws_plans, fallback_windows) = Self::build_layout_plans(session);
+        let layout = ctl.get_layout().await.unwrap_or_default();
+        tracing::info!("detected layout: {layout:?}");
+
+        match layout.as_str() {
+            "dwindle" => {
+                self.restore_dwindle(session, ctl, events, report, active_rules, pending)
+                    .await
+            }
+            "master" => {
+                self.restore_master(session, ctl, events, report, active_rules, pending)
+                    .await
+            }
+            other => {
+                tracing::warn!(
+                    "layout {other:?} has no layout-aware restore, falling back to simple"
+                );
+                self.restore_simple(session, ctl, events, report, active_rules, pending)
+                    .await
+            }
+        }
+    }
+
+    /// Dwindle restore: BSP inference, preselect-based placement, then
+    /// splitratio application and convergence.
+    async fn restore_dwindle(
+        &self,
+        session: &SessionFile,
+        ctl: &HyprCtl,
+        events: &mut mpsc::Receiver<HyprEvent>,
+        report: &mut RestoreReport,
+        active_rules: &mut Vec<String>,
+        pending: &mut Vec<PendingWindow>,
+    ) -> Result<()> {
+        let (floating, ws_plans, fallback_windows) = Self::build_dwindle_plans(session);
 
         let addresses = self
             .execute_bsp_plans(
@@ -230,6 +271,7 @@ impl RestoreEngine {
             )
             .await?;
 
+        self.apply_split_ratios(ctl, &ws_plans, &addresses).await;
         self.converge_tiled_sizes(session, ctl, &addresses).await;
         self.apply_fullscreen(session, ctl, &addresses).await?;
 
@@ -259,9 +301,129 @@ impl RestoreEngine {
         Ok(())
     }
 
-    fn build_layout_plans(
+    /// Master layout restore: infer master/stack split, set orientation and
+    /// mfact, open master windows first then stack windows.
+    async fn restore_master(
+        &self,
         session: &SessionFile,
-    ) -> (Vec<usize>, HashMap<String, WorkspacePlan>, Vec<usize>) {
+        ctl: &HyprCtl,
+        events: &mut mpsc::Receiver<HyprEvent>,
+        report: &mut RestoreReport,
+        active_rules: &mut Vec<String>,
+        pending: &mut Vec<PendingWindow>,
+    ) -> Result<()> {
+        let (floating, master_plans, fallback_windows) = Self::build_master_plans(session);
+
+        let mut sorted_ws: Vec<&String> = master_plans.keys().collect();
+        sorted_ws.sort();
+
+        for ws in sorted_ws {
+            let plan = &master_plans[ws];
+            tracing::info!(
+                "[master] workspace {ws}: orientation={}, mfact={:.3}, {} master + {} stack",
+                plan.orientation,
+                plan.mfact,
+                plan.master_indices.len(),
+                plan.stack_indices.len()
+            );
+
+            // Set the default mfact before opening windows so the layout
+            // engine uses it for initial placement on this workspace.
+            drop(
+                ctl.keyword(&format!("master:mfact {:.6}", plan.mfact))
+                    .await,
+            );
+
+            ctl.dispatch(&format!("workspace {ws}")).await?;
+            drop(
+                ctl.dispatch(&format!("layoutmsg orientation{}", plan.orientation))
+                    .await,
+            );
+
+            // Open the first master window.
+            if let Some(&first_idx) = plan.master_indices.first() {
+                let window = &session.windows[first_idx];
+                tracing::info!("[master] opening master: {}", window.app_id);
+                match self
+                    .restore_window(window, ctl, events, active_rules, pending)
+                    .await
+                {
+                    Ok(()) => report.restored += 1,
+                    Err(e) => {
+                        report.failed += 1;
+                        report.errors.push((window.app_id.clone(), e.to_string()));
+                    }
+                }
+            }
+
+            // Open additional master windows and promote them.
+            for &idx in plan.master_indices.iter().skip(1) {
+                let window = &session.windows[idx];
+                tracing::info!("[master] opening extra master: {}", window.app_id);
+                match self
+                    .restore_window(window, ctl, events, active_rules, pending)
+                    .await
+                {
+                    Ok(()) => {
+                        report.restored += 1;
+                        drop(ctl.dispatch("layoutmsg addmaster").await);
+                    }
+                    Err(e) => {
+                        report.failed += 1;
+                        report.errors.push((window.app_id.clone(), e.to_string()));
+                    }
+                }
+            }
+
+            // Open stack windows in order.
+            for &idx in &plan.stack_indices {
+                let window = &session.windows[idx];
+                tracing::info!("[master] opening stack: {}", window.app_id);
+                match self
+                    .restore_window(window, ctl, events, active_rules, pending)
+                    .await
+                {
+                    Ok(()) => report.restored += 1,
+                    Err(e) => {
+                        report.failed += 1;
+                        report.errors.push((window.app_id.clone(), e.to_string()));
+                    }
+                }
+            }
+
+            // Nothing else needed: the `master:mfact` keyword set before
+            // window placement is used by the layout engine for this workspace.
+        }
+
+        self.restore_indexed(
+            session,
+            ctl,
+            events,
+            report,
+            &fallback_windows,
+            "fallback",
+            active_rules,
+            pending,
+        )
+        .await?;
+        self.restore_indexed(
+            session,
+            ctl,
+            events,
+            report,
+            &floating,
+            "float",
+            active_rules,
+            pending,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    fn build_dwindle_plans(
+        session: &SessionFile,
+    ) -> (Vec<usize>, HashMap<String, DwindlePlan>, Vec<usize>) {
         let floating: Vec<usize> = session
             .windows
             .iter()
@@ -279,14 +441,15 @@ impl RestoreEngine {
             }
         }
 
-        let mut ws_plans: HashMap<String, WorkspacePlan> = HashMap::new();
+        let mut ws_plans: HashMap<String, DwindlePlan> = HashMap::new();
         let mut fallback_windows: Vec<usize> = Vec::new();
 
         for (ws, (wins, indices)) in &ws_groups {
-            if let Some(plan) = layout::build_workspace_plan(wins, indices) {
+            if let Some(plan) = dwindle::build_workspace_plan(wins, indices) {
                 tracing::info!(
-                    "workspace {ws}: inferred BSP layout for {} windows",
-                    wins.len()
+                    "workspace {ws}: inferred BSP layout for {} windows ({} ratio steps)",
+                    wins.len(),
+                    plan.ratio_steps.len(),
                 );
                 ws_plans.insert((*ws).to_string(), plan);
             } else {
@@ -300,6 +463,49 @@ impl RestoreEngine {
         (floating, ws_plans, fallback_windows)
     }
 
+    fn build_master_plans(
+        session: &SessionFile,
+    ) -> (Vec<usize>, HashMap<String, MasterPlan>, Vec<usize>) {
+        let floating: Vec<usize> = session
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.floating)
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut ws_groups: HashMap<&str, (Vec<&WindowEntry>, Vec<usize>)> = HashMap::new();
+        for (i, w) in session.windows.iter().enumerate() {
+            if !w.floating {
+                let entry = ws_groups.entry(&w.workspace).or_default();
+                entry.0.push(w);
+                entry.1.push(i);
+            }
+        }
+
+        let mut master_plans: HashMap<String, MasterPlan> = HashMap::new();
+        let mut fallback_windows: Vec<usize> = Vec::new();
+
+        for (ws, (wins, indices)) in &ws_groups {
+            if let Some(plan) = master::build_workspace_plan(wins, indices) {
+                tracing::info!(
+                    "workspace {ws}: inferred master layout ({} master, {} stack, orientation={})",
+                    plan.master_indices.len(),
+                    plan.stack_indices.len(),
+                    plan.orientation,
+                );
+                master_plans.insert((*ws).to_string(), plan);
+            } else {
+                tracing::warn!(
+                    "workspace {ws}: could not infer master layout, falling back to simple restore"
+                );
+                fallback_windows.extend_from_slice(indices);
+            }
+        }
+
+        (floating, master_plans, fallback_windows)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn execute_bsp_plans(
         &self,
@@ -307,7 +513,7 @@ impl RestoreEngine {
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
-        ws_plans: &HashMap<String, WorkspacePlan>,
+        ws_plans: &HashMap<String, DwindlePlan>,
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
     ) -> Result<HashMap<usize, String>> {
@@ -438,6 +644,48 @@ impl RestoreEngine {
                 rule_name,
             });
             Ok(None)
+        }
+    }
+
+    /// Apply `layoutmsg splitratio exact` for each split node in the BSP tree
+    /// that has a direct leaf child. This is deterministic and far more
+    /// reliable than iterative pixel-delta convergence.
+    async fn apply_split_ratios(
+        &self,
+        ctl: &HyprCtl,
+        ws_plans: &HashMap<String, DwindlePlan>,
+        addresses: &HashMap<usize, String>,
+    ) {
+        let mut applied = 0usize;
+        let mut sorted_ws: Vec<&String> = ws_plans.keys().collect();
+        sorted_ws.sort();
+
+        for ws in sorted_ws {
+            let plan = &ws_plans[ws];
+            for step in &plan.ratio_steps {
+                let Some(addr) = addresses.get(&step.focus_window_idx) else {
+                    continue;
+                };
+                if let Err(e) = ctl.dispatch(&format!("focuswindow address:0x{addr}")).await {
+                    tracing::warn!("splitratio: focus failed: {e}");
+                    continue;
+                }
+                match ctl
+                    .dispatch(&format!("layoutmsg splitratio exact {:.6}", step.ratio))
+                    .await
+                {
+                    Ok(resp) if resp.trim() != "ok" => {
+                        tracing::warn!("splitratio: unexpected response: {resp}");
+                    }
+                    Err(e) => tracing::warn!("splitratio: ipc error: {e}"),
+                    _ => applied += 1,
+                }
+            }
+        }
+
+        if applied > 0 {
+            tracing::info!("applied {applied} split ratios");
+            tokio::time::sleep(Duration::from_millis(30)).await;
         }
     }
 
