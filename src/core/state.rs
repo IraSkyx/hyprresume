@@ -103,11 +103,11 @@ impl StateManager {
         }
     }
 
-    /// Update position, size, floating, and fullscreen for all tracked windows
-    /// from a fresh `j/clients` snapshot. Call before saving to ensure geometry
-    /// reflects the user's current layout (Hyprland emits no events for tiled
-    /// resize or position changes).
-    pub fn refresh_geometry(&mut self, clients: &[HyprClient]) {
+    /// Update position, size, floating, fullscreen and monitor for all tracked
+    /// windows from a fresh `j/clients` snapshot. Call before saving to ensure
+    /// geometry reflects the user's current layout (Hyprland emits no events
+    /// for tiled resize or position changes).
+    pub fn refresh_geometry(&mut self, clients: &[HyprClient], monitor_map: &HashMap<i64, String>) {
         let client_map: HashMap<String, &HyprClient> = clients
             .iter()
             .map(|c| (normalize_address(&c.address), c))
@@ -121,6 +121,9 @@ impl StateManager {
                 window.floating = client.floating;
                 window.fullscreen = client.fullscreen_mode > 0;
                 window.workspace.clone_from(&client.workspace.name);
+                if let Some(name) = monitor_map.get(&client.monitor) {
+                    window.monitor.clone_from(name);
+                }
                 updated += 1;
             }
         }
@@ -170,6 +173,7 @@ mod tests {
             app_id: app_id.to_string(),
             launch_cmd: format!("{app_id}-cmd"),
             workspace: workspace.to_string(),
+            monitor: String::new(),
             position: (0, 0),
             size: (800, 600),
             floating: false,

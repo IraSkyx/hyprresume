@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
@@ -86,6 +86,8 @@ impl RestoreEngine {
                 }
             }
         });
+
+        bind_workspaces_to_monitors(session, ctl).await;
 
         let had_focus_on_activate = ctl
             .get_option("misc:focus_on_activate")
@@ -860,6 +862,61 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Before restoring windows, move each workspace to the monitor it was
+/// originally saved on. Only binds to monitors that are currently connected;
+/// workspaces targeting unavailable monitors get default Hyprland placement
+/// (typically the first available monitor).
+async fn bind_workspaces_to_monitors(session: &SessionFile, ctl: &HyprCtl) {
+    let available: HashSet<String> = match ctl.get_monitors().await {
+        Ok(monitors) => monitors.into_iter().map(|m| m.name).collect(),
+        Err(e) => {
+            tracing::warn!("could not query monitors, skipping workspace-monitor binding: {e}");
+            return;
+        }
+    };
+
+    let mut seen = HashSet::new();
+    let mut missing_monitors: HashSet<&str> = HashSet::new();
+    let mut bound = 0usize;
+
+    for window in &session.windows {
+        let Some(monitor) = window.monitor.as_deref().filter(|m| !m.is_empty()) else {
+            continue;
+        };
+        if !seen.insert((&window.workspace, monitor)) {
+            continue;
+        }
+        if !available.contains(monitor) {
+            missing_monitors.insert(monitor);
+            continue;
+        }
+        tracing::info!(
+            "binding workspace {} to monitor {monitor}",
+            window.workspace
+        );
+        drop(
+            ctl.dispatch(&format!(
+                "moveworkspacetomonitor {} {monitor}",
+                window.workspace
+            ))
+            .await,
+        );
+        bound += 1;
+    }
+
+    if !missing_monitors.is_empty() {
+        let names: Vec<&str> = missing_monitors.into_iter().collect();
+        tracing::info!(
+            "saved monitor(s) no longer connected ({}), \
+             affected workspaces will use default placement",
+            names.join(", ")
+        );
+    }
+    if bound > 0 {
+        tracing::info!("bound {bound} workspace(s) to their saved monitors");
+    }
+}
+
 async fn disable_all_rules(ctl: &HyprCtl, rules: &[String]) {
     for rule in rules {
         drop(
@@ -953,6 +1010,7 @@ mod tests {
             app_id: app_id.to_string(),
             launch_cmd: launch_cmd.to_string(),
             workspace: "1".to_string(),
+            monitor: None,
             floating: false,
             fullscreen: false,
             position: None,
