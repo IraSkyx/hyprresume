@@ -46,31 +46,34 @@ pub fn extract_indexed(
         .collect()
 }
 
-/// Measure the largest pixel gap between adjacent tiled windows by examining
-/// pairs that overlap in the perpendicular axis. Returns 0 when no gaps are
-/// found (e.g. `gaps_in = 0` or a single window).
+/// Measure the smallest pixel gap between tiled windows that overlap in the
+/// perpendicular axis. This finds the actual Hyprland `gaps_in` value by
+/// picking the minimum non-zero gap — truly adjacent windows always have the
+/// smallest distance, while non-adjacent pairs (separated by other windows)
+/// have larger distances that would inflate tolerance and break BSP inference.
+/// Returns 0 when no gaps are found (e.g. `gaps_in = 0` or a single window).
 pub fn infer_gap_from_geometry(indexed: &[IndexedWindow]) -> i32 {
     if indexed.len() < 2 {
         return 0;
     }
 
-    let mut max_gap = 0i32;
+    let mut min_gap = i32::MAX;
     for a in indexed {
         for b in indexed {
             // b is to the right of a, and they share vertical overlap
             let h_gap = b.x - (a.x + a.w);
             if h_gap > 0 && ranges_overlap(a.y, a.y + a.h, b.y, b.y + b.h) {
-                max_gap = max_gap.max(h_gap);
+                min_gap = min_gap.min(h_gap);
             }
 
             // b is below a, and they share horizontal overlap
             let v_gap = b.y - (a.y + a.h);
             if v_gap > 0 && ranges_overlap(a.x, a.x + a.w, b.x, b.x + b.w) {
-                max_gap = max_gap.max(v_gap);
+                min_gap = min_gap.min(v_gap);
             }
         }
     }
-    max_gap
+    if min_gap == i32::MAX { 0 } else { min_gap }
 }
 
 pub const fn ranges_overlap(a_start: i32, a_end: i32, b_start: i32, b_end: i32) -> bool {
