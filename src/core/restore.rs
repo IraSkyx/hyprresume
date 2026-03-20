@@ -647,9 +647,9 @@ impl RestoreEngine {
         }
     }
 
-    /// Apply `layoutmsg splitratio exact` for each split node in the BSP tree
-    /// that has a direct leaf child. This is deterministic and far more
-    /// reliable than iterative pixel-delta convergence.
+    /// Apply `layoutmsg splitratio <delta>` for each split node in the BSP tree
+    /// that has a direct leaf child. The delta is computed from the default 0.5
+    /// ratio since freshly-created windows always start at the default.
     async fn apply_split_ratios(
         &self,
         ctl: &HyprCtl,
@@ -670,8 +670,9 @@ impl RestoreEngine {
                     tracing::warn!("splitratio: focus failed: {e}");
                     continue;
                 }
+                let delta = step.ratio - 0.5;
                 match ctl
-                    .dispatch(&format!("layoutmsg splitratio exact {:.6}", step.ratio))
+                    .dispatch(&format!("layoutmsg splitratio {delta:.6}"))
                     .await
                 {
                     Ok(resp) if resp.trim() != "ok" => {
