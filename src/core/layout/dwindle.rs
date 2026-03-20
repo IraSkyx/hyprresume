@@ -41,7 +41,7 @@ pub struct RestoreStep {
 }
 
 /// Post-placement correction: focus this window and apply
-/// `layoutmsg splitratio exact <ratio>` to set its parent split precisely.
+/// `layoutmsg splitratio <delta>` to set its parent split precisely.
 #[derive(Debug, Clone)]
 pub struct SplitRatioStep {
     pub focus_window_idx: usize,
@@ -542,5 +542,26 @@ mod tests {
         let wp = build_workspace_plan(&refs, &[0, 1]).unwrap();
         assert_eq!(wp.ratio_steps.len(), 1);
         assert!((wp.ratio_steps[0].ratio - 0.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn four_windows_nested_with_large_gap_between_non_adjacent() {
+        //  +--------+----------+------+
+        //  |        |          |  c   |
+        //  |   a    |    d     |      |
+        //  |        |          +------+
+        //  |        |          |  b   |
+        //  +--------+----------+------+
+        let a = make_entry("a", "2", 21, 69, 1112, 1350);
+        let b = make_entry("b", "2", 2062, 1124, 477, 295);
+        let c = make_entry("c", "2", 2062, 69, 477, 1033);
+        let d = make_entry("d", "2", 1155, 69, 885, 1350);
+        let refs: Vec<&WindowEntry> = vec![&a, &b, &c, &d];
+        let plan = build_workspace_plan(&refs, &[0, 1, 2, 3]);
+        assert!(
+            plan.is_some(),
+            "BSP inference should succeed for 4-window dwindle layout with gaps"
+        );
+        assert_eq!(plan.unwrap().steps.len(), 4);
     }
 }
