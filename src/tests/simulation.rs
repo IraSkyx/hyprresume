@@ -121,7 +121,7 @@ mod tests {
         // Save session
         let session_dir = tempfile::tempdir().unwrap();
         let snapshot =
-            SnapshotEngine::new_with_dir(session_dir.path().to_path_buf(), false).unwrap();
+            SnapshotEngine::new_with_dir(session_dir.path().to_path_buf()).unwrap();
 
         let path = snapshot.save(&state, "test-lifecycle").unwrap();
         assert!(path.exists());
@@ -245,7 +245,7 @@ mod tests {
         // Save and verify final state
         let session_dir = tempfile::tempdir().unwrap();
         let snapshot =
-            SnapshotEngine::new_with_dir(session_dir.path().to_path_buf(), false).unwrap();
+            SnapshotEngine::new_with_dir(session_dir.path().to_path_buf()).unwrap();
         snapshot.save(&state, "events").unwrap();
 
         let loaded = snapshot.load("events").unwrap();
@@ -286,23 +286,14 @@ mod tests {
         }
         assert_eq!(state.window_count(), 3);
 
-        // Save with dedup (default mode)
+        // Save keeps all windows including duplicates
         let session_dir = tempfile::tempdir().unwrap();
         let snapshot =
-            SnapshotEngine::new_with_dir(session_dir.path().to_path_buf(), false).unwrap();
-        snapshot.save(&state, "dedup").unwrap();
+            SnapshotEngine::new_with_dir(session_dir.path().to_path_buf()).unwrap();
+        snapshot.save(&state, "all").unwrap();
 
-        let loaded = snapshot.load("dedup").unwrap();
-        assert_eq!(loaded.windows.len(), 1);
-        assert_eq!(loaded.windows[0].app_id, "firefox");
-
-        // Save with per-window mode
-        let snapshot_pw =
-            SnapshotEngine::new_with_dir(session_dir.path().to_path_buf(), true).unwrap();
-        snapshot_pw.save(&state, "nodedup").unwrap();
-
-        let loaded_pw = snapshot_pw.load("nodedup").unwrap();
-        assert_eq!(loaded_pw.windows.len(), 3);
+        let loaded = snapshot.load("all").unwrap();
+        assert_eq!(loaded.windows.len(), 3);
     }
 
     /// Named sessions: save "work" and "gaming", list both, delete one.
@@ -327,7 +318,7 @@ mod tests {
 
         let session_dir = tempfile::tempdir().unwrap();
         let snapshot =
-            SnapshotEngine::new_with_dir(session_dir.path().to_path_buf(), false).unwrap();
+            SnapshotEngine::new_with_dir(session_dir.path().to_path_buf()).unwrap();
 
         snapshot.save(&state, "work").unwrap();
 

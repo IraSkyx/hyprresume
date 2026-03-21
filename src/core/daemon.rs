@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use signal_hook::consts::{SIGINT, SIGTERM, SIGUSR1};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use signal_hook_tokio::Signals;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +54,7 @@ pub async fn run(config: Config) -> Result<()> {
     }
 
     let mut signals =
-        Signals::new([SIGINT, SIGTERM, SIGUSR1]).context("registering signal handlers")?;
+        Signals::new([SIGHUP, SIGINT, SIGTERM, SIGUSR1]).context("registering signal handlers")?;
 
     let save_interval = Duration::from_secs(config.general.save_interval);
     let mut save_timer = tokio::time::interval(save_interval);
@@ -73,19 +73,19 @@ pub async fn run(config: Config) -> Result<()> {
             }
 
             _ = save_timer.tick() => {
-                save_with_refresh(&state, &snapshot, &ctl, "periodic").await;
+                save_with_refresh(&state, &snapshot, &ctl, &resolver, "periodic").await;
             }
 
             Some(sig) = futures::StreamExt::next(&mut signals) => {
                 match sig {
-                    SIGTERM | SIGINT => {
+                    SIGHUP | SIGTERM | SIGINT => {
                         tracing::info!("received signal {sig}, saving and exiting...");
-                        save_with_refresh(&state, &snapshot, &ctl, "final").await;
+                        save_with_refresh(&state, &snapshot, &ctl, &resolver, "final").await;
                         break;
                     }
                     SIGUSR1 => {
                         tracing::info!("received SIGUSR1, saving session...");
-                        save_with_refresh(&state, &snapshot, &ctl, "manual").await;
+                        save_with_refresh(&state, &snapshot, &ctl, &resolver, "manual").await;
                     }
                     _ => {}
                 }
@@ -93,7 +93,7 @@ pub async fn run(config: Config) -> Result<()> {
 
             else => {
                 tracing::info!("event stream ended, saving final session...");
-                save_with_refresh(&state, &snapshot, &ctl, "final").await;
+                save_with_refresh(&state, &snapshot, &ctl, &resolver, "final").await;
                 break;
             }
         }
@@ -104,23 +104,24 @@ pub async fn run(config: Config) -> Result<()> {
     Ok(())
 }
 
-/// Refresh window geometry from Hyprland and save. Hyprland emits no events
-/// for tiled resize/position changes, so we must re-query before every save
-/// to capture the user's actual layout.
+/// Sync state with a fresh client snapshot from Hyprland and save.
+/// This picks up any windows that were missed by the event stream
+/// and removes windows that no longer exist.
 async fn save_with_refresh(
     state: &Arc<Mutex<StateManager>>,
     snapshot: &SnapshotEngine,
     ctl: &HyprCtl,
+    resolver: &AppResolver,
     label: &str,
 ) {
     let mut state = state.lock().await;
-    if state.window_count() == 0 {
-        return;
-    }
     let monitor_map = ctl.get_monitor_map().await.unwrap_or_default();
     match ctl.get_clients().await {
-        Ok(clients) => state.refresh_geometry(&clients, &monitor_map),
-        Err(e) => tracing::warn!("{label} save: failed to refresh geometry: {e}"),
+        Ok(clients) => state.sync_with_clients(&clients, &monitor_map, resolver),
+        Err(e) => tracing::warn!("{label} save: failed to sync clients: {e}"),
+    }
+    if state.window_count() == 0 {
+        return;
     }
     let save_result = snapshot.save(&state, "last");
     drop(state);

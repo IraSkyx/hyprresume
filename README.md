@@ -53,7 +53,6 @@ Place a config file at `~/.config/hypr/hyprresume.toml`. All fields are optional
 save_interval = 120           # seconds between auto-saves
 session_dir = "~/.local/share/hyprresume"
 restore_on_start = true
-per_window_launch = true      # one process per window, not per unique app
 restore_geometry = true       # restore floating window position/size
 restore_layout = true         # reconstruct tiling layout (dwindle + master)
 

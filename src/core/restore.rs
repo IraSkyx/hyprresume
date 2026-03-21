@@ -103,6 +103,7 @@ impl RestoreEngine {
 
         let mut active_rules = Vec::new();
         let mut pending = Vec::new();
+        let mut launched = HashSet::new();
 
         if self.restore_layout {
             self.restore_with_layout(
@@ -112,6 +113,7 @@ impl RestoreEngine {
                 &mut report,
                 &mut active_rules,
                 &mut pending,
+                &mut launched,
             )
             .await?;
         } else {
@@ -122,6 +124,7 @@ impl RestoreEngine {
                 &mut report,
                 &mut active_rules,
                 &mut pending,
+                &mut launched,
             )
             .await?;
         }
@@ -176,6 +179,7 @@ impl RestoreEngine {
         report: &mut RestoreReport,
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
+        launched: &mut HashSet<String>,
     ) -> Result<()> {
         let total = session.windows.len();
         for (i, window) in session.windows.iter().enumerate() {
@@ -188,7 +192,7 @@ impl RestoreEngine {
             );
 
             match self
-                .restore_window(window, ctl, events, active_rules, pending)
+                .restore_window(window, ctl, events, active_rules, pending, launched)
                 .await
             {
                 Ok(()) => {
@@ -223,24 +227,25 @@ impl RestoreEngine {
         report: &mut RestoreReport,
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
+        launched: &mut HashSet<String>,
     ) -> Result<()> {
         let layout = ctl.get_layout().await.unwrap_or_default();
         tracing::info!("detected layout: {layout:?}");
 
         match layout.as_str() {
             "dwindle" => {
-                self.restore_dwindle(session, ctl, events, report, active_rules, pending)
+                self.restore_dwindle(session, ctl, events, report, active_rules, pending, launched)
                     .await
             }
             "master" => {
-                self.restore_master(session, ctl, events, report, active_rules, pending)
+                self.restore_master(session, ctl, events, report, active_rules, pending, launched)
                     .await
             }
             other => {
                 tracing::warn!(
                     "layout {other:?} has no layout-aware restore, falling back to simple"
                 );
-                self.restore_simple(session, ctl, events, report, active_rules, pending)
+                self.restore_simple(session, ctl, events, report, active_rules, pending, launched)
                     .await
             }
         }
@@ -256,6 +261,7 @@ impl RestoreEngine {
         report: &mut RestoreReport,
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
+        launched: &mut HashSet<String>,
     ) -> Result<()> {
         let (floating, ws_plans, fallback_windows) = Self::build_dwindle_plans(session);
 
@@ -268,6 +274,7 @@ impl RestoreEngine {
                 &ws_plans,
                 active_rules,
                 pending,
+                launched,
             )
             .await?;
 
@@ -284,6 +291,7 @@ impl RestoreEngine {
             "fallback",
             active_rules,
             pending,
+            launched,
         )
         .await?;
         self.restore_indexed(
@@ -295,6 +303,7 @@ impl RestoreEngine {
             "float",
             active_rules,
             pending,
+            launched,
         )
         .await?;
 
@@ -311,6 +320,7 @@ impl RestoreEngine {
         report: &mut RestoreReport,
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
+        launched: &mut HashSet<String>,
     ) -> Result<()> {
         let (floating, master_plans, fallback_windows) = Self::build_master_plans(session);
 
@@ -345,7 +355,7 @@ impl RestoreEngine {
                 let window = &session.windows[first_idx];
                 tracing::info!("[master] opening master: {}", window.app_id);
                 match self
-                    .restore_window(window, ctl, events, active_rules, pending)
+                    .restore_window(window, ctl, events, active_rules, pending, launched)
                     .await
                 {
                     Ok(()) => report.restored += 1,
@@ -361,7 +371,7 @@ impl RestoreEngine {
                 let window = &session.windows[idx];
                 tracing::info!("[master] opening extra master: {}", window.app_id);
                 match self
-                    .restore_window(window, ctl, events, active_rules, pending)
+                    .restore_window(window, ctl, events, active_rules, pending, launched)
                     .await
                 {
                     Ok(()) => {
@@ -380,7 +390,7 @@ impl RestoreEngine {
                 let window = &session.windows[idx];
                 tracing::info!("[master] opening stack: {}", window.app_id);
                 match self
-                    .restore_window(window, ctl, events, active_rules, pending)
+                    .restore_window(window, ctl, events, active_rules, pending, launched)
                     .await
                 {
                     Ok(()) => report.restored += 1,
@@ -404,6 +414,7 @@ impl RestoreEngine {
             "fallback",
             active_rules,
             pending,
+            launched,
         )
         .await?;
         self.restore_indexed(
@@ -415,6 +426,7 @@ impl RestoreEngine {
             "float",
             active_rules,
             pending,
+            launched,
         )
         .await?;
 
@@ -516,6 +528,7 @@ impl RestoreEngine {
         ws_plans: &HashMap<String, DwindlePlan>,
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
+        launched: &mut HashSet<String>,
     ) -> Result<HashMap<usize, String>> {
         let mut addresses: HashMap<usize, String> = HashMap::new();
         let mut sorted_ws: Vec<&String> = ws_plans.keys().collect();
@@ -553,6 +566,7 @@ impl RestoreEngine {
                         active_rules,
                         pending,
                         &mut rule_counter,
+                        launched,
                     )
                     .await
                 {
@@ -593,6 +607,7 @@ impl RestoreEngine {
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
         rule_counter: &mut usize,
+        launched: &mut HashSet<String>,
     ) -> Result<Option<String>> {
         let rule_name = format!(
             "hyprresume-{}-{}",
@@ -611,10 +626,18 @@ impl RestoreEngine {
             window.workspace
         ))
         .await?;
-        let launch_cmd = build_bsp_launch_cmd(window);
-        ctl.dispatch(&format!("exec {launch_cmd}"))
-            .await
-            .with_context(|| format!("launching {}", window.launch_cmd))?;
+
+        if launched.insert(window.launch_cmd.clone()) {
+            let launch_cmd = build_bsp_launch_cmd(window);
+            ctl.dispatch(&format!("exec {launch_cmd}"))
+                .await
+                .with_context(|| format!("launching {}", window.launch_cmd))?;
+        } else {
+            tracing::debug!(
+                "  {} already launched, waiting for window from existing instance",
+                window.app_id
+            );
+        }
 
         if let Some(ref addr) = self.wait_for_open_event(events, &window.app_id).await {
             tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
@@ -772,6 +795,7 @@ impl RestoreEngine {
         label: &str,
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
+        launched: &mut HashSet<String>,
     ) -> Result<()> {
         for &idx in indices {
             let window = &session.windows[idx];
@@ -781,7 +805,7 @@ impl RestoreEngine {
                 window.workspace
             );
             match self
-                .restore_window(window, ctl, events, active_rules, pending)
+                .restore_window(window, ctl, events, active_rules, pending, launched)
                 .await
             {
                 Ok(()) => report.restored += 1,
@@ -808,6 +832,7 @@ impl RestoreEngine {
         events: &mut mpsc::Receiver<HyprEvent>,
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
+        launched: &mut HashSet<String>,
     ) -> Result<Option<String>> {
         let rule_name = format!(
             "hyprresume-{}-{}",
@@ -826,13 +851,20 @@ impl RestoreEngine {
         ))
         .await?;
 
-        let launch_cmd = build_launch_cmd(window);
-        ctl.dispatch(&format!(
-            "exec [workspace {} silent] {launch_cmd}",
-            window.workspace
-        ))
-        .await
-        .with_context(|| format!("launching {}", window.launch_cmd))?;
+        if launched.insert(window.launch_cmd.clone()) {
+            let launch_cmd = build_launch_cmd(window);
+            ctl.dispatch(&format!(
+                "exec [workspace {} silent] {launch_cmd}",
+                window.workspace
+            ))
+            .await
+            .with_context(|| format!("launching {}", window.launch_cmd))?;
+        } else {
+            tracing::debug!(
+                "  {} already launched, waiting for window from existing instance",
+                window.app_id
+            );
+        }
 
         if let Some(ref addr) = self.wait_for_open_event(events, &window.app_id).await {
             tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
@@ -872,9 +904,10 @@ impl RestoreEngine {
         events: &mut mpsc::Receiver<HyprEvent>,
         active_rules: &mut Vec<String>,
         pending: &mut Vec<PendingWindow>,
+        launched: &mut HashSet<String>,
     ) -> Result<()> {
         let addr = self
-            .launch_and_track(window, ctl, events, active_rules, pending)
+            .launch_and_track(window, ctl, events, active_rules, pending, launched)
             .await?;
 
         let Some(addr) = addr else {
@@ -1111,10 +1144,12 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Before restoring windows, move each workspace to the monitor it was
-/// originally saved on. Only binds to monitors that are currently connected;
-/// workspaces targeting unavailable monitors get default Hyprland placement
-/// (typically the first available monitor).
+/// Before restoring windows, bind each workspace to its saved monitor using
+/// `keyword workspace` rules. Unlike `dispatch moveworkspacetomonitor`, these
+/// rules are persistent and apply even when a workspace doesn't exist yet —
+/// Hyprland will create it on the correct monitor when a window is placed there.
+/// Only binds to monitors that are currently connected; workspaces targeting
+/// unavailable monitors get default Hyprland placement.
 async fn bind_workspaces_to_monitors(session: &SessionFile, ctl: &HyprCtl) {
     let available: HashSet<String> = match ctl.get_monitors().await {
         Ok(monitors) => monitors.into_iter().map(|m| m.name).collect(),
@@ -1143,13 +1178,18 @@ async fn bind_workspaces_to_monitors(session: &SessionFile, ctl: &HyprCtl) {
             "binding workspace {} to monitor {monitor}",
             window.workspace
         );
-        drop(
-            ctl.dispatch(&format!(
-                "moveworkspacetomonitor {} {monitor}",
+        if let Err(e) = ctl
+            .keyword(&format!(
+                "workspace {},monitor:{monitor}",
                 window.workspace
             ))
-            .await,
-        );
+            .await
+        {
+            tracing::warn!(
+                "failed to bind workspace {} to {monitor}: {e}",
+                window.workspace
+            );
+        }
         bound += 1;
     }
 

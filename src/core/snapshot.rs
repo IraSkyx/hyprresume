@@ -7,7 +7,6 @@ use crate::models::{SessionFile, SessionMeta, TrackedWindow, WindowEntry};
 
 pub struct SnapshotEngine {
     session_dir: PathBuf,
-    per_window_launch: bool,
 }
 
 fn sanitize_session_name(name: &str) -> Result<&str> {
@@ -75,32 +74,18 @@ impl SnapshotEngine {
         std::fs::create_dir_all(&session_dir)
             .with_context(|| format!("creating session dir {}", session_dir.display()))?;
 
-        Ok(Self {
-            session_dir,
-            per_window_launch: config.general.per_window_launch,
-        })
+        Ok(Self { session_dir })
     }
 
     pub fn save(&self, state: &StateManager, name: &str) -> Result<PathBuf> {
         let name = sanitize_session_name(name)?;
         let windows = state.windows();
 
-        let eligible: Vec<&TrackedWindow> = if self.per_window_launch {
-            windows
-                .iter()
-                .copied()
-                .filter(|w| !w.launch_cmd.is_empty())
-                .collect()
-        } else {
-            let mut seen = std::collections::HashSet::new();
-            windows
-                .iter()
-                .copied()
-                .filter(|w| {
-                    !w.launch_cmd.is_empty() && seen.insert((w.app_id.clone(), w.profile.clone()))
-                })
-                .collect()
-        };
+        let eligible: Vec<&TrackedWindow> = windows
+            .iter()
+            .copied()
+            .filter(|w| !w.launch_cmd.is_empty())
+            .collect();
 
         let cwds = resolve_cwds_for_windows(&eligible);
         let entries: Vec<WindowEntry> = eligible
@@ -129,7 +114,7 @@ impl SnapshotEngine {
             .with_context(|| format!("renaming session file to {}", final_path.display()))?;
 
         tracing::info!(
-            "saved session '{name}' ({} apps) to {}",
+            "saved session '{name}' ({} windows) to {}",
             session_file.windows.len(),
             final_path.display()
         );
@@ -195,13 +180,10 @@ impl SnapshotEngine {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_dir(session_dir: PathBuf, per_window_launch: bool) -> Result<Self> {
+    pub(crate) fn new_with_dir(session_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&session_dir)
             .with_context(|| format!("creating session dir {}", session_dir.display()))?;
-        Ok(Self {
-            session_dir,
-            per_window_launch,
-        })
+        Ok(Self { session_dir })
     }
 }
 
@@ -237,7 +219,7 @@ mod tests {
     #[test]
     fn save_and_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let state = make_state_with_windows(vec![
             ("0xa", "firefox", "1", false),
@@ -254,9 +236,9 @@ mod tests {
     }
 
     #[test]
-    fn save_deduplicates_by_app_id() {
+    fn save_keeps_all_windows_of_same_app() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let state = make_state_with_windows(vec![
             ("0xa", "firefox", "1", false),
@@ -264,19 +246,16 @@ mod tests {
             ("0xc", "code", "3", false),
         ]);
 
-        engine.save(&state, "dedup").unwrap();
-        let loaded = engine.load("dedup").unwrap();
+        engine.save(&state, "all").unwrap();
+        let loaded = engine.load("all").unwrap();
 
-        assert_eq!(loaded.windows.len(), 2);
-        let app_ids: Vec<&str> = loaded.windows.iter().map(|w| w.app_id.as_str()).collect();
-        assert!(app_ids.contains(&"firefox"));
-        assert!(app_ids.contains(&"code"));
+        assert_eq!(loaded.windows.len(), 3);
     }
 
     #[test]
-    fn save_dedup_distinguishes_profiles() {
+    fn save_keeps_all_windows_with_profiles() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let mut config = Config::default();
         config.general.session_dir = "/tmp/unused".to_string();
@@ -325,21 +304,14 @@ mod tests {
         engine.save(&state, "profiles").unwrap();
         let loaded = engine.load("profiles").unwrap();
 
-        // Two distinct profiles: "-P work" and "-P personal"
-        assert_eq!(loaded.windows.len(), 2);
-        let profiles: Vec<Option<&str>> = loaded
-            .windows
-            .iter()
-            .map(|w| w.profile.as_deref())
-            .collect();
-        assert!(profiles.contains(&Some("-P work")));
-        assert!(profiles.contains(&Some("-P personal")));
+        // All three windows saved, even with duplicate profiles
+        assert_eq!(loaded.windows.len(), 3);
     }
 
     #[test]
     fn profile_field_roundtrips_through_toml() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), true).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let mut config = Config::default();
         config.general.session_dir = "/tmp/unused".to_string();
@@ -411,25 +383,11 @@ mod tests {
         assert!(code.profile.is_none());
     }
 
-    #[test]
-    fn save_per_window_launch_keeps_all() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), true).unwrap();
-
-        let state = make_state_with_windows(vec![
-            ("0xa", "firefox", "1", false),
-            ("0xb", "firefox", "2", false),
-        ]);
-
-        engine.save(&state, "perwin").unwrap();
-        let loaded = engine.load("perwin").unwrap();
-        assert_eq!(loaded.windows.len(), 2);
-    }
 
     #[test]
     fn save_skips_empty_launch_cmd() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let mut config = Config::default();
         config.general.session_dir = "/tmp/unused".to_string();
@@ -456,7 +414,7 @@ mod tests {
     #[test]
     fn save_floating_includes_geometry() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let state = make_state_with_windows(vec![("0xa", "nautilus", "1", true)]);
 
@@ -472,7 +430,7 @@ mod tests {
     #[test]
     fn save_non_floating_includes_geometry() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let state = make_state_with_windows(vec![("0xa", "firefox", "1", false)]);
 
@@ -488,7 +446,7 @@ mod tests {
     #[test]
     fn exists_true_after_save() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         assert!(!engine.exists("test"));
 
@@ -501,7 +459,7 @@ mod tests {
     #[test]
     fn delete_removes_session() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let state = make_state_with_windows(vec![("0xa", "firefox", "1", false)]);
         engine.save(&state, "deleteme").unwrap();
@@ -514,14 +472,14 @@ mod tests {
     #[test]
     fn delete_nonexistent_no_error() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
         engine.delete("nonexistent").unwrap();
     }
 
     #[test]
     fn list_returns_sessions_sorted_by_timestamp() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         std::fs::write(
             dir.path().join("first.toml"),
@@ -543,7 +501,7 @@ mod tests {
     #[test]
     fn list_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let sessions = engine.list().unwrap();
         assert!(sessions.is_empty());
@@ -552,7 +510,7 @@ mod tests {
     #[test]
     fn list_ignores_hidden_files() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let state = make_state_with_windows(vec![("0xa", "firefox", "1", false)]);
         engine.save(&state, "visible").unwrap();
@@ -567,7 +525,7 @@ mod tests {
     #[test]
     fn load_nonexistent_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let result = engine.load("nonexistent");
         assert!(result.is_err());
@@ -576,7 +534,7 @@ mod tests {
     #[test]
     fn save_is_atomic() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let state = make_state_with_windows(vec![("0xa", "firefox", "1", false)]);
         engine.save(&state, "atomic").unwrap();
@@ -591,7 +549,7 @@ mod tests {
     #[test]
     fn rejects_path_traversal() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf(), false).unwrap();
+        let engine = SnapshotEngine::new_with_dir(dir.path().to_path_buf()).unwrap();
 
         let state = make_state_with_windows(vec![("0xa", "firefox", "1", false)]);
 

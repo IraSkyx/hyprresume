@@ -11,9 +11,6 @@ session_dir = "~/.local/share/hyprresume"
 # Automatically restore the "last" session on daemon start
 restore_on_start = true
 
-# Launch one command per window (true) or one per unique app (false)
-per_window_launch = false
-
 # Restore floating window position and size
 restore_geometry = true
 

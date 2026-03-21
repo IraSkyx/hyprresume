@@ -4,6 +4,7 @@ use regex::Regex;
 
 use crate::config::Config;
 use crate::models::{HyprClient, TrackedWindow};
+use crate::resolver::AppResolver;
 
 pub struct StateManager {
     windows: HashMap<String, TrackedWindow>,
@@ -103,19 +104,47 @@ impl StateManager {
         }
     }
 
-    /// Update position, size, floating, fullscreen and monitor for all tracked
-    /// windows from a fresh `j/clients` snapshot. Call before saving to ensure
-    /// geometry reflects the user's current layout (Hyprland emits no events
-    /// for tiled resize or position changes).
-    pub fn refresh_geometry(&mut self, clients: &[HyprClient], monitor_map: &HashMap<i64, String>) {
+    /// Synchronise internal state with a fresh `j/clients` snapshot.
+    /// - Adds windows that exist in Hyprland but are missing from state
+    ///   (e.g. if an OpenWindow event was lost).
+    /// - Removes windows from state that no longer exist in Hyprland.
+    /// - Updates geometry, workspace, monitor, floating and fullscreen for
+    ///   every tracked window.
+    pub fn sync_with_clients(
+        &mut self,
+        clients: &[HyprClient],
+        monitor_map: &HashMap<i64, String>,
+        resolver: &AppResolver,
+    ) {
+        // If the client list is empty but we have tracked windows, the
+        // compositor is likely shutting down. Preserve existing state so
+        // the final save isn't wiped.
+        if clients.is_empty() && !self.windows.is_empty() {
+            tracing::debug!("sync: empty client list, preserving {} tracked windows", self.windows.len());
+            return;
+        }
+
         let client_map: HashMap<String, &HyprClient> = clients
             .iter()
             .map(|c| (normalize_address(&c.address), c))
             .collect();
 
-        let mut updated = 0usize;
+        // Remove windows that are no longer in Hyprland.
+        let stale: Vec<String> = self
+            .windows
+            .keys()
+            .filter(|k| !client_map.contains_key(k.as_str()))
+            .cloned()
+            .collect();
+        for key in &stale {
+            if let Some(w) = self.windows.remove(key) {
+                tracing::debug!("sync: removed stale window {} ({})", w.app_id, w.address);
+            }
+        }
+
+        // Update existing windows.
         for (key, window) in &mut self.windows {
-            if let Some(client) = client_map.get(key) {
+            if let Some(client) = client_map.get(key.as_str()) {
                 window.position = client.at;
                 window.size = client.size;
                 window.floating = client.floating;
@@ -124,12 +153,48 @@ impl StateManager {
                 if let Some(name) = monitor_map.get(&client.monitor) {
                     window.monitor.clone_from(name);
                 }
-                updated += 1;
             }
         }
+
+        // Collect windows that are new to us.
+        let new_windows: Vec<TrackedWindow> = client_map
+            .iter()
+            .filter(|(norm_addr, client)| {
+                !self.windows.contains_key(norm_addr.as_str())
+                    && self.should_track(&client.class)
+            })
+            .map(|(_, client)| {
+                let launch_cmd = resolver.resolve(&client.class, client.pid).unwrap_or_default();
+                let profile = crate::resolver::profile::detect_browser_profile(client.pid);
+                let monitor = monitor_map
+                    .get(&client.monitor)
+                    .cloned()
+                    .unwrap_or_default();
+                TrackedWindow {
+                    address: client.address.clone(),
+                    app_id: client.class.clone(),
+                    launch_cmd,
+                    workspace: client.workspace.name.clone(),
+                    monitor,
+                    position: client.at,
+                    size: client.size,
+                    floating: client.floating,
+                    fullscreen: client.fullscreen_mode > 0,
+                    pid: client.pid,
+                    profile,
+                }
+            })
+            .collect();
+        let added = new_windows.len();
+        for w in new_windows {
+            self.add(w);
+        }
+
         tracing::debug!(
-            "refreshed geometry for {updated}/{} windows",
-            self.windows.len()
+            "sync: {} tracked, {} stale removed, {} new added",
+            self.windows.len(),
+            stale.len(),
+            added
         );
     }
 
@@ -154,7 +219,6 @@ mod tests {
                 save_interval: 60,
                 session_dir: "/tmp/hyprresume-test".into(),
                 restore_on_start: false,
-                per_window_launch: false,
                 restore_geometry: false,
                 restore_layout: true,
             },

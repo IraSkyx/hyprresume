@@ -25,8 +25,6 @@ pub struct GeneralConfig {
     #[serde(default = "default_true")]
     pub restore_on_start: bool,
     #[serde(default = "default_true")]
-    pub per_window_launch: bool,
-    #[serde(default = "default_true")]
     pub restore_geometry: bool,
     #[serde(default = "default_true")]
     pub restore_layout: bool,
@@ -77,7 +75,6 @@ impl Config {
             save_interval: default_save_interval(),
             session_dir: default_session_dir(),
             restore_on_start: true,
-            per_window_launch: true,
             restore_geometry: true,
             restore_layout: true,
         }
@@ -138,7 +135,6 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.general.save_interval, 120);
         assert!(cfg.general.restore_on_start);
-        assert!(cfg.general.per_window_launch);
         assert!(cfg.general.restore_geometry);
         assert!(cfg.general.restore_layout);
         assert!(!cfg.rules.exclude.is_empty());
@@ -194,7 +190,6 @@ restore_on_start = false
 save_interval = 30
 session_dir = "/tmp/my-sessions"
 restore_on_start = false
-per_window_launch = true
 restore_geometry = false
 restore_layout = true
 
@@ -213,7 +208,6 @@ include = ["^firefox$"]
         assert_eq!(cfg.general.save_interval, 30);
         assert_eq!(cfg.general.session_dir, "/tmp/my-sessions");
         assert!(!cfg.general.restore_on_start);
-        assert!(cfg.general.per_window_launch);
         assert!(!cfg.general.restore_geometry);
         assert!(cfg.general.restore_layout);
         assert_eq!(cfg.rules.exclude.len(), 2);
