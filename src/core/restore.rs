@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use crate::core::layout::dwindle::{self, DwindlePlan};
 use crate::core::layout::master::{self, MasterPlan};
-use crate::ipc::client::HyprCtl;
+use crate::ipc::client::{HyprCtl, SessionctlExpectation};
 use crate::ipc::event_listener::parse_event;
 use crate::models::{HyprEvent, SessionFile, WindowEntry};
 
@@ -17,7 +17,6 @@ const WINDOW_APPEAR_TIMEOUT: Duration = Duration::from_secs(15);
 /// after the main restore loop finishes.
 const LATE_WINDOW_GRACE_PERIOD: Duration = Duration::from_secs(60);
 
-/// Known terminal working-directory flags, keyed by binary name.
 /// Known terminal working-directory flags, keyed by binary name.
 const TERMINAL_CWD_FLAGS: &[(&str, &str)] = &[
     ("ghostty", "--working-directory="),
@@ -33,31 +32,13 @@ const TERMINAL_CWD_FLAGS: &[(&str, &str)] = &[
 /// each launched process from being independent (breaking CWD).
 const SINGLE_INSTANCE_FLAGS: &[&str] = &["--gtk-single-instance=true", "--single-instance"];
 
-/// A window that was launched but didn't appear within the per-window timeout.
-/// Handed off to the background watcher for deferred placement.
-/// A window that was launched but didn't appear within the per-window timeout.
-/// Handed off to the background watcher for deferred placement.
-struct PendingWindow {
-    app_id: String,
-    workspace: String,
-    floating: bool,
-    fullscreen: bool,
-    position: Option<(i32, i32)>,
-    size: Option<(i32, i32)>,
-    rule_name: String,
-}
-
 pub struct RestoreEngine {
-    restore_geometry: bool,
     restore_layout: bool,
 }
 
 impl RestoreEngine {
-    pub const fn new(restore_geometry: bool, restore_layout: bool) -> Self {
-        Self {
-            restore_geometry,
-            restore_layout,
-        }
+    pub const fn new(restore_layout: bool) -> Self {
+        Self { restore_layout }
     }
 
     pub async fn restore(
@@ -101,7 +82,12 @@ impl RestoreEngine {
             drop(ctl.keyword("misc:focus_on_activate false").await);
         }
 
-        let mut active_rules = Vec::new();
+        // Register all expected windows with the compositor via sessionctl.
+        // The compositor applies saved state (workspace, monitor, floating,
+        // position/size) atomically during mapWindow(), before the layout
+        // engine touches the window.
+        self.register_sessionctl_expectations(session, ctl).await?;
+
         let mut pending = Vec::new();
         let mut launched = HashSet::new();
 
@@ -111,7 +97,6 @@ impl RestoreEngine {
                 ctl,
                 &mut event_rx,
                 &mut report,
-                &mut active_rules,
                 &mut pending,
                 &mut launched,
             )
@@ -122,7 +107,6 @@ impl RestoreEngine {
                 ctl,
                 &mut event_rx,
                 &mut report,
-                &mut active_rules,
                 &mut pending,
                 &mut launched,
             )
@@ -142,33 +126,81 @@ impl RestoreEngine {
         );
 
         let watcher_handle = if pending.is_empty() {
-            disable_all_rules(ctl, &active_rules).await;
+            // All windows appeared — finish immediately.
+            if let Err(e) = ctl.sessionctl_finish().await {
+                tracing::warn!("sessionctl finish failed: {e}");
+            }
             None
         } else {
             tracing::info!(
                 "spawning late-window watcher for {} app(s): {}",
                 pending.len(),
-                pending
-                    .iter()
-                    .map(|p| p.app_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                pending.join(", ")
             );
             let socket_paths = ctl.socket_paths().clone();
-            let restore_geometry = self.restore_geometry;
             Some(tokio::spawn(async move {
-                watch_late_windows(
-                    socket_paths,
-                    pending,
-                    active_rules,
-                    restore_geometry,
-                    LATE_WINDOW_GRACE_PERIOD,
-                )
-                .await;
+                watch_late_windows(socket_paths, pending, LATE_WINDOW_GRACE_PERIOD).await;
             }))
         };
 
         Ok((report, watcher_handle))
+    }
+
+    /// Register all session windows as expectations with the compositor via
+    /// the sessionctl IPC.
+    async fn register_sessionctl_expectations(
+        &self,
+        session: &SessionFile,
+        ctl: &HyprCtl,
+    ) -> Result<()> {
+        if !ctl.sessionctl_available().await {
+            bail!("compositor does not support sessionctl — cannot restore session");
+        }
+
+        if !ctl.sessionctl_begin().await.unwrap_or(false) {
+            bail!("sessionctl begin failed");
+        }
+
+        let mut registered = 0usize;
+        for window in &session.windows {
+            let pos = window.position.unwrap_or((0, 0));
+            let size = window.size.unwrap_or((0, 0));
+            let monitor = window.monitor.as_deref().unwrap_or("");
+
+            match ctl
+                .sessionctl_expect(&SessionctlExpectation {
+                    app_id: &window.app_id,
+                    workspace: &window.workspace,
+                    monitor,
+                    floating: window.floating,
+                    fullscreen: window.fullscreen,
+                    maximized: false,
+                    x: f64::from(pos.0),
+                    y: f64::from(pos.1),
+                    w: f64::from(size.0),
+                    h: f64::from(size.1),
+                })
+                .await
+            {
+                Ok(true) => registered += 1,
+                Ok(false) => {
+                    tracing::warn!("sessionctl expect failed for {}", window.app_id);
+                }
+                Err(err) => {
+                    tracing::warn!("sessionctl expect error for {}: {err}", window.app_id);
+                }
+            }
+        }
+
+        if !ctl.sessionctl_end().await.unwrap_or(false) {
+            bail!("sessionctl end failed");
+        }
+
+        tracing::info!(
+            "registered {registered}/{} windows with compositor sessionctl",
+            session.windows.len()
+        );
+        Ok(())
     }
 
     async fn restore_simple(
@@ -177,8 +209,7 @@ impl RestoreEngine {
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
-        active_rules: &mut Vec<String>,
-        pending: &mut Vec<PendingWindow>,
+        pending: &mut Vec<String>,
         launched: &mut HashSet<String>,
     ) -> Result<()> {
         let total = session.windows.len();
@@ -192,10 +223,10 @@ impl RestoreEngine {
             );
 
             match self
-                .restore_window(window, ctl, events, active_rules, pending, launched)
+                .launch_and_track(window, ctl, events, pending, launched, false)
                 .await
             {
-                Ok(()) => {
+                Ok(_) => {
                     report.restored += 1;
                     tracing::info!("  restored {}", window.app_id);
                 }
@@ -214,19 +245,13 @@ impl RestoreEngine {
     /// Auto-detects the active Hyprland layout (dwindle, master, ...) and
     /// dispatches to the appropriate strategy. Falls back to simple restore
     /// for unknown layouts.
-    /// Restore windows using layout-aware strategies.
-    ///
-    /// Auto-detects the active Hyprland layout (dwindle, master, ...) and
-    /// dispatches to the appropriate strategy. Falls back to simple restore
-    /// for unknown layouts.
     async fn restore_with_layout(
         &self,
         session: &SessionFile,
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
-        active_rules: &mut Vec<String>,
-        pending: &mut Vec<PendingWindow>,
+        pending: &mut Vec<String>,
         launched: &mut HashSet<String>,
     ) -> Result<()> {
         let layout = ctl.get_layout().await.unwrap_or_default();
@@ -234,18 +259,18 @@ impl RestoreEngine {
 
         match layout.as_str() {
             "dwindle" => {
-                self.restore_dwindle(session, ctl, events, report, active_rules, pending, launched)
+                self.restore_dwindle(session, ctl, events, report, pending, launched)
                     .await
             }
             "master" => {
-                self.restore_master(session, ctl, events, report, active_rules, pending, launched)
+                self.restore_master(session, ctl, events, report, pending, launched)
                     .await
             }
             other => {
                 tracing::warn!(
                     "layout {other:?} has no layout-aware restore, falling back to simple"
                 );
-                self.restore_simple(session, ctl, events, report, active_rules, pending, launched)
+                self.restore_simple(session, ctl, events, report, pending, launched)
                     .await
             }
         }
@@ -259,23 +284,13 @@ impl RestoreEngine {
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
-        active_rules: &mut Vec<String>,
-        pending: &mut Vec<PendingWindow>,
+        pending: &mut Vec<String>,
         launched: &mut HashSet<String>,
     ) -> Result<()> {
         let (floating, ws_plans, fallback_windows) = Self::build_dwindle_plans(session);
 
         let addresses = self
-            .execute_bsp_plans(
-                session,
-                ctl,
-                events,
-                report,
-                &ws_plans,
-                active_rules,
-                pending,
-                launched,
-            )
+            .execute_bsp_plans(session, ctl, events, report, &ws_plans, pending, launched)
             .await?;
 
         self.apply_split_ratios(ctl, &ws_plans, &addresses).await;
@@ -289,21 +304,12 @@ impl RestoreEngine {
             report,
             &fallback_windows,
             "fallback",
-            active_rules,
             pending,
             launched,
         )
         .await?;
         self.restore_indexed(
-            session,
-            ctl,
-            events,
-            report,
-            &floating,
-            "float",
-            active_rules,
-            pending,
-            launched,
+            session, ctl, events, report, &floating, "float", pending, launched,
         )
         .await?;
 
@@ -318,8 +324,7 @@ impl RestoreEngine {
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
-        active_rules: &mut Vec<String>,
-        pending: &mut Vec<PendingWindow>,
+        pending: &mut Vec<String>,
         launched: &mut HashSet<String>,
     ) -> Result<()> {
         let (floating, master_plans, fallback_windows) = Self::build_master_plans(session);
@@ -337,8 +342,6 @@ impl RestoreEngine {
                 plan.stack_indices.len()
             );
 
-            // Set the default mfact before opening windows so the layout
-            // engine uses it for initial placement on this workspace.
             drop(
                 ctl.keyword(&format!("master:mfact {:.6}", plan.mfact))
                     .await,
@@ -355,10 +358,10 @@ impl RestoreEngine {
                 let window = &session.windows[first_idx];
                 tracing::info!("[master] opening master: {}", window.app_id);
                 match self
-                    .restore_window(window, ctl, events, active_rules, pending, launched)
+                    .launch_and_track(window, ctl, events, pending, launched, false)
                     .await
                 {
-                    Ok(()) => report.restored += 1,
+                    Ok(_) => report.restored += 1,
                     Err(e) => {
                         report.failed += 1;
                         report.errors.push((window.app_id.clone(), e.to_string()));
@@ -371,10 +374,10 @@ impl RestoreEngine {
                 let window = &session.windows[idx];
                 tracing::info!("[master] opening extra master: {}", window.app_id);
                 match self
-                    .restore_window(window, ctl, events, active_rules, pending, launched)
+                    .launch_and_track(window, ctl, events, pending, launched, false)
                     .await
                 {
-                    Ok(()) => {
+                    Ok(_) => {
                         report.restored += 1;
                         drop(ctl.dispatch("layoutmsg addmaster").await);
                     }
@@ -390,19 +393,16 @@ impl RestoreEngine {
                 let window = &session.windows[idx];
                 tracing::info!("[master] opening stack: {}", window.app_id);
                 match self
-                    .restore_window(window, ctl, events, active_rules, pending, launched)
+                    .launch_and_track(window, ctl, events, pending, launched, false)
                     .await
                 {
-                    Ok(()) => report.restored += 1,
+                    Ok(_) => report.restored += 1,
                     Err(e) => {
                         report.failed += 1;
                         report.errors.push((window.app_id.clone(), e.to_string()));
                     }
                 }
             }
-
-            // Nothing else needed: the `master:mfact` keyword set before
-            // window placement is used by the layout engine for this workspace.
         }
 
         self.restore_indexed(
@@ -412,21 +412,12 @@ impl RestoreEngine {
             report,
             &fallback_windows,
             "fallback",
-            active_rules,
             pending,
             launched,
         )
         .await?;
         self.restore_indexed(
-            session,
-            ctl,
-            events,
-            report,
-            &floating,
-            "float",
-            active_rules,
-            pending,
-            launched,
+            session, ctl, events, report, &floating, "float", pending, launched,
         )
         .await?;
 
@@ -526,14 +517,12 @@ impl RestoreEngine {
         events: &mut mpsc::Receiver<HyprEvent>,
         report: &mut RestoreReport,
         ws_plans: &HashMap<String, DwindlePlan>,
-        active_rules: &mut Vec<String>,
-        pending: &mut Vec<PendingWindow>,
+        pending: &mut Vec<String>,
         launched: &mut HashSet<String>,
     ) -> Result<HashMap<usize, String>> {
         let mut addresses: HashMap<usize, String> = HashMap::new();
         let mut sorted_ws: Vec<&String> = ws_plans.keys().collect();
         sorted_ws.sort();
-        let mut rule_counter = 0usize;
 
         for ws in sorted_ws {
             let plan = &ws_plans[ws];
@@ -559,15 +548,7 @@ impl RestoreEngine {
                 }
 
                 match self
-                    .bsp_launch_and_track(
-                        window,
-                        ctl,
-                        events,
-                        active_rules,
-                        pending,
-                        &mut rule_counter,
-                        launched,
-                    )
+                    .launch_and_track(window, ctl, events, pending, launched, true)
                     .await
                 {
                     Ok(Some(addr)) => {
@@ -591,84 +572,6 @@ impl RestoreEngine {
         Ok(addresses)
     }
 
-    /// BSP-specific launch: switches to the workspace first (so preselect
-    /// works even for single-instance apps), strips single-instance flags,
-    /// and does NOT use `[workspace N silent]` since we are already on the
-    /// target workspace.
-    ///
-    /// The rule is disabled immediately once the window appears so that a
-    /// subsequent window of the same class never sees a stale rule. Only
-    /// rules for timed-out windows are kept alive for the background watcher.
-    async fn bsp_launch_and_track(
-        &self,
-        window: &WindowEntry,
-        ctl: &HyprCtl,
-        events: &mut mpsc::Receiver<HyprEvent>,
-        active_rules: &mut Vec<String>,
-        pending: &mut Vec<PendingWindow>,
-        rule_counter: &mut usize,
-        launched: &mut HashSet<String>,
-    ) -> Result<Option<String>> {
-        let rule_name = format!(
-            "hyprresume-{}-{}",
-            window.app_id.replace(['.', ' '], "-"),
-            rule_counter
-        );
-        *rule_counter += 1;
-        let class_escaped = regex::escape(&window.app_id);
-
-        ctl.keyword(&format!(
-            "windowrule[{rule_name}]:match:class ^({class_escaped})$"
-        ))
-        .await?;
-        ctl.keyword(&format!(
-            "windowrule[{rule_name}]:workspace {} silent",
-            window.workspace
-        ))
-        .await?;
-
-        if launched.insert(window.launch_cmd.clone()) {
-            let launch_cmd = build_bsp_launch_cmd(window);
-            ctl.dispatch(&format!("exec {launch_cmd}"))
-                .await
-                .with_context(|| format!("launching {}", window.launch_cmd))?;
-        } else {
-            tracing::debug!(
-                "  {} already launched, waiting for window from existing instance",
-                window.app_id
-            );
-        }
-
-        if let Some(ref addr) = self.wait_for_open_event(events, &window.app_id).await {
-            tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
-            disable_all_rules(ctl, &[rule_name]).await;
-            drop(
-                ctl.dispatch(&format!(
-                    "movetoworkspacesilent {},address:0x{addr}",
-                    window.workspace
-                ))
-                .await,
-            );
-            Ok(Some(addr.clone()))
-        } else {
-            tracing::warn!(
-                "{} did not appear within {}s, deferring to late-window watcher",
-                window.app_id,
-                WINDOW_APPEAR_TIMEOUT.as_secs()
-            );
-            active_rules.push(rule_name.clone());
-            pending.push(PendingWindow {
-                app_id: window.app_id.clone(),
-                workspace: window.workspace.clone(),
-                floating: window.floating,
-                fullscreen: window.fullscreen,
-                position: window.position,
-                size: window.size,
-                rule_name,
-            });
-            Ok(None)
-        }
-    }
 
     /// Apply `layoutmsg splitratio <delta>` for each split node in the BSP tree
     /// that has a direct leaf child. The delta is computed from the default 0.5
@@ -767,7 +670,6 @@ impl RestoreEngine {
         tracing::debug!("  tiled sizes settled after {MAX_PASSES} passes");
     }
 
-    /// Iterative convergence: re-query window sizes and apply pixel corrections
     async fn apply_fullscreen(
         &self,
         session: &SessionFile,
@@ -793,8 +695,7 @@ impl RestoreEngine {
         report: &mut RestoreReport,
         indices: &[usize],
         label: &str,
-        active_rules: &mut Vec<String>,
-        pending: &mut Vec<PendingWindow>,
+        pending: &mut Vec<String>,
         launched: &mut HashSet<String>,
     ) -> Result<()> {
         for &idx in indices {
@@ -805,10 +706,10 @@ impl RestoreEngine {
                 window.workspace
             );
             match self
-                .restore_window(window, ctl, events, active_rules, pending, launched)
+                .launch_and_track(window, ctl, events, pending, launched, false)
                 .await
             {
-                Ok(()) => report.restored += 1,
+                Ok(_) => report.restored += 1,
                 Err(e) => {
                     report.failed += 1;
                     report.errors.push((window.app_id.clone(), e.to_string()));
@@ -818,47 +719,27 @@ impl RestoreEngine {
         Ok(())
     }
 
-    /// Launch a window with workspace placement via named rules, wait for it
-    /// to appear, then return its address.
-    ///
-    /// The rule is disabled immediately once the window appears so that a
-    /// subsequent window of the same class never sees a stale rule. Only
-    /// rules for timed-out windows are kept alive (pushed to `active_rules`)
-    /// for the background late-window watcher.
+    /// Launch a window and wait for it to appear. Sessionctl handles all
+    /// workspace placement, floating state, and geometry during `mapWindow()`.
+    /// When `strip_single_instance` is true, single-instance flags are removed
+    /// so each exec creates an independent process (needed for BSP preselect).
     async fn launch_and_track(
         &self,
         window: &WindowEntry,
         ctl: &HyprCtl,
         events: &mut mpsc::Receiver<HyprEvent>,
-        active_rules: &mut Vec<String>,
-        pending: &mut Vec<PendingWindow>,
+        pending: &mut Vec<String>,
         launched: &mut HashSet<String>,
+        strip_single_instance: bool,
     ) -> Result<Option<String>> {
-        let rule_name = format!(
-            "hyprresume-{}-{}",
-            window.app_id.replace(['.', ' '], "-"),
-            active_rules.len()
-        );
-        let class_escaped = regex::escape(&window.app_id);
-
-        ctl.keyword(&format!(
-            "windowrule[{rule_name}]:match:class ^({class_escaped})$"
-        ))
-        .await?;
-        ctl.keyword(&format!(
-            "windowrule[{rule_name}]:workspace {} silent",
-            window.workspace
-        ))
-        .await?;
-
         if launched.insert(window.launch_cmd.clone()) {
-            let launch_cmd = build_launch_cmd(window);
-            ctl.dispatch(&format!(
-                "exec [workspace {} silent] {launch_cmd}",
-                window.workspace
-            ))
-            .await
-            .with_context(|| format!("launching {}", window.launch_cmd))?;
+            let mut launch_cmd = build_launch_cmd(window);
+            if strip_single_instance {
+                launch_cmd = strip_single_instance_flags(&launch_cmd);
+            }
+            ctl.dispatch(&format!("exec {launch_cmd}"))
+                .await
+                .with_context(|| format!("launching {}", window.launch_cmd))?;
         } else {
             tracing::debug!(
                 "  {} already launched, waiting for window from existing instance",
@@ -866,73 +747,24 @@ impl RestoreEngine {
             );
         }
 
-        if let Some(ref addr) = self.wait_for_open_event(events, &window.app_id).await {
-            tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
-            disable_all_rules(ctl, &[rule_name]).await;
-            drop(
-                ctl.dispatch(&format!(
-                    "movetoworkspacesilent {},address:0x{addr}",
-                    window.workspace
-                ))
-                .await,
-            );
-            Ok(Some(addr.clone()))
-        } else {
-            tracing::warn!(
-                "{} did not appear within {}s, deferring to late-window watcher",
-                window.app_id,
-                WINDOW_APPEAR_TIMEOUT.as_secs()
-            );
-            active_rules.push(rule_name.clone());
-            pending.push(PendingWindow {
-                app_id: window.app_id.clone(),
-                workspace: window.workspace.clone(),
-                floating: window.floating,
-                fullscreen: window.fullscreen,
-                position: window.position,
-                size: window.size,
-                rule_name,
-            });
-            Ok(None)
-        }
-    }
-
-    async fn restore_window(
-        &self,
-        window: &WindowEntry,
-        ctl: &HyprCtl,
-        events: &mut mpsc::Receiver<HyprEvent>,
-        active_rules: &mut Vec<String>,
-        pending: &mut Vec<PendingWindow>,
-        launched: &mut HashSet<String>,
-    ) -> Result<()> {
-        let addr = self
-            .launch_and_track(window, ctl, events, active_rules, pending, launched)
-            .await?;
-
-        let Some(addr) = addr else {
-            return Ok(());
-        };
-
-        if self.restore_geometry {
-            if window.floating
-                && let (Some((x, y)), Some((w, h))) = (window.position, window.size)
-            {
-                ctl.dispatch(&format!("setfloating address:0x{addr}"))
-                    .await?;
-                ctl.dispatch(&format!("resizewindowpixel exact {w} {h},address:0x{addr}"))
-                    .await?;
-                ctl.dispatch(&format!("movewindowpixel exact {x} {y},address:0x{addr}"))
-                    .await?;
-            }
-
-            if window.fullscreen {
-                ctl.dispatch(&format!("fullscreen 0,address:0x{addr}"))
-                    .await?;
-            }
-        }
-
-        Ok(())
+        self.wait_for_open_event(events, &window.app_id)
+            .await
+            .as_ref()
+            .map_or_else(
+                || {
+                    tracing::warn!(
+                        "{} did not appear within {}s, deferring to late-window watcher",
+                        window.app_id,
+                        WINDOW_APPEAR_TIMEOUT.as_secs()
+                    );
+                    pending.push(window.app_id.clone());
+                    Ok(None)
+                },
+                |addr| {
+                    tracing::debug!("  {} appeared at 0x{addr}", window.app_id);
+                    Ok(Some(addr.clone()))
+                },
+            )
     }
 
     async fn wait_for_open_event(
@@ -956,21 +788,15 @@ impl RestoreEngine {
 }
 
 /// Background task that watches for windows that didn't appear during the main
-/// restore loop. Keeps their Hyprland window rules active and listens on
-/// socket2 until every pending window appears or the grace period expires.
+/// restore loop. Sessionctl expectations are still active in the compositor, so
+/// late windows will be placed correctly automatically — we just log them.
 async fn watch_late_windows(
     paths: crate::ipc::client::HyprSocketPaths,
-    mut pending: Vec<PendingWindow>,
-    all_rules: Vec<String>,
-    restore_geometry: bool,
+    mut pending: Vec<String>,
     grace_period: Duration,
 ) {
-    let ctl = HyprCtl::new(paths.clone());
-    let mut resolved_rules: Vec<String> = Vec::new();
-
     let Ok(stream) = tokio::net::UnixStream::connect(&paths.socket2).await else {
-        tracing::error!("late-window watcher: failed to connect to socket2, disabling rules");
-        disable_all_rules(&ctl, &all_rules).await;
+        tracing::error!("late-window watcher: failed to connect to socket2");
         return;
     };
 
@@ -988,17 +814,12 @@ async fn watch_late_windows(
             Ok(Ok(Some(line))) => {
                 let event = parse_event(line.trim());
                 if let HyprEvent::OpenWindow { address, class, .. } = event
-                    && let Some(idx) = pending.iter().position(|p| p.app_id == class)
+                    && let Some(idx) = pending.iter().position(|p| *p == class)
                 {
-                    let pw = pending.remove(idx);
+                    pending.remove(idx);
                     tracing::info!(
-                        "late-window watcher: {} appeared at 0x{address}, \
-                         moving to workspace {}",
-                        pw.app_id,
-                        pw.workspace
+                        "late-window watcher: {class} appeared at 0x{address} (sessionctl handles placement)",
                     );
-                    apply_late_window(&ctl, &pw, &address, restore_geometry).await;
-                    resolved_rules.push(pw.rule_name);
 
                     if pending.is_empty() {
                         tracing::info!("late-window watcher: all pending windows resolved");
@@ -1014,72 +835,20 @@ async fn watch_late_windows(
         }
     }
 
-    // Eagerly disable rules for windows that were resolved during the watch.
-    disable_all_rules(&ctl, &resolved_rules).await;
-
     if !pending.is_empty() {
         tracing::warn!(
             "late-window watcher: {} window(s) never appeared after {}s: {}",
             pending.len(),
             grace_period.as_secs(),
-            pending
-                .iter()
-                .map(|p| p.app_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending.join(", ")
         );
     }
 
-    // Disable all remaining rules (including for windows that appeared in the
-    // main loop but whose rules were kept alive for forking-app safety).
-    let remaining_rules: Vec<String> = all_rules
-        .into_iter()
-        .filter(|r| !resolved_rules.contains(r))
-        .collect();
-    disable_all_rules(&ctl, &remaining_rules).await;
-}
-
-async fn apply_late_window(
-    ctl: &HyprCtl,
-    pw: &PendingWindow,
-    address: &str,
-    restore_geometry: bool,
-) {
-    drop(
-        ctl.dispatch(&format!(
-            "movetoworkspacesilent {},address:0x{address}",
-            pw.workspace
-        ))
-        .await,
-    );
-
-    if restore_geometry
-        && pw.floating
-        && let (Some((x, y)), Some((w, h))) = (pw.position, pw.size)
-    {
-        drop(
-            ctl.dispatch(&format!("setfloating address:0x{address}"))
-                .await,
-        );
-        drop(
-            ctl.dispatch(&format!(
-                "resizewindowpixel exact {w} {h},address:0x{address}"
-            ))
-            .await,
-        );
-        drop(
-            ctl.dispatch(&format!(
-                "movewindowpixel exact {x} {y},address:0x{address}"
-            ))
-            .await,
-        );
-    }
-
-    if pw.fullscreen {
-        drop(
-            ctl.dispatch(&format!("fullscreen 0,address:0x{address}"))
-                .await,
-        );
+    // Clear remaining expectations so new windows of the same class
+    // aren't auto-placed after the restore window closes.
+    let ctl = HyprCtl::new(paths);
+    if let Err(e) = ctl.sessionctl_finish().await {
+        tracing::warn!("late-window watcher: sessionctl finish failed: {e}");
     }
 }
 
@@ -1119,15 +888,6 @@ fn strip_single_instance_flags(cmd: &str) -> String {
         .filter(|arg| !SINGLE_INSTANCE_FLAGS.contains(arg))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Build launch command for BSP restore: always strips single-instance flags
-/// so each launch creates an independent process (critical for preselect to
-/// work, since single-instance apps create windows in the existing process's
-/// workspace, bypassing the preselection on the target workspace).
-fn build_bsp_launch_cmd(window: &WindowEntry) -> String {
-    let base = build_launch_cmd(window);
-    strip_single_instance_flags(&base)
 }
 
 /// Match the binary name in a launch command against known terminals
@@ -1179,10 +939,7 @@ async fn bind_workspaces_to_monitors(session: &SessionFile, ctl: &HyprCtl) {
             window.workspace
         );
         if let Err(e) = ctl
-            .keyword(&format!(
-                "workspace {},monitor:{monitor}",
-                window.workspace
-            ))
+            .keyword(&format!("workspace {},monitor:{monitor}", window.workspace))
             .await
         {
             tracing::warn!(
@@ -1206,18 +963,6 @@ async fn bind_workspaces_to_monitors(session: &SessionFile, ctl: &HyprCtl) {
     }
 }
 
-async fn disable_all_rules(ctl: &HyprCtl, rules: &[String]) {
-    for rule in rules {
-        drop(
-            ctl.keyword(&format!("windowrule[{rule}]:enable false"))
-                .await,
-        );
-    }
-    if !rules.is_empty() {
-        tracing::debug!("disabled {} window rules", rules.len());
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct RestoreReport {
     pub restored: usize,
@@ -1229,45 +974,8 @@ pub struct RestoreReport {
 mod tests {
     use super::*;
     use crate::ipc::client::HyprSocketPaths;
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::UnixListener;
-    use tokio::sync::Mutex;
-
-    /// Mock socket1 that records all received IPC commands and responds "ok".
-    struct RecordingSocket1 {
-        listener: UnixListener,
-        log: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl RecordingSocket1 {
-        fn new(path: &std::path::Path) -> (Self, Arc<Mutex<Vec<String>>>) {
-            let listener = UnixListener::bind(path).unwrap();
-            let log = Arc::new(Mutex::new(Vec::new()));
-            (
-                Self {
-                    listener,
-                    log: log.clone(),
-                },
-                log,
-            )
-        }
-
-        async fn serve(self) {
-            loop {
-                let Ok((mut stream, _)) = self.listener.accept().await else {
-                    break;
-                };
-                let log = self.log.clone();
-                tokio::spawn(async move {
-                    let mut buf = String::new();
-                    drop(stream.read_to_string(&mut buf).await);
-                    log.lock().await.push(buf);
-                    drop(stream.write_all(b"ok").await);
-                });
-            }
-        }
-    }
 
     /// Bind a socket2 listener (synchronously creates the file) and spawn
     /// a task that accepts one connection and emits events with delays.
@@ -1377,9 +1085,6 @@ mod tests {
         let sock1 = dir.path().join("s1.sock");
         let sock2 = dir.path().join("s2.sock");
 
-        let (mock1, log) = RecordingSocket1::new(&sock1);
-        let s1 = tokio::spawn(mock1.serve());
-
         let s2 = spawn_delayed_socket2(
             &sock2,
             vec![(
@@ -1389,48 +1094,21 @@ mod tests {
         );
 
         let paths = HyprSocketPaths::new(sock1, sock2);
-        let pending = vec![PendingWindow {
-            app_id: "slow-app".to_string(),
-            workspace: "3".to_string(),
-            floating: false,
-            fullscreen: false,
-            position: None,
-            size: None,
-            rule_name: "hyprresume-slow-app".to_string(),
-        }];
-        let all_rules = vec!["hyprresume-slow-app".to_string()];
+        let pending = vec!["slow-app".to_string()];
 
-        watch_late_windows(paths, pending, all_rules, false, Duration::from_secs(5)).await;
+        watch_late_windows(paths, pending, Duration::from_secs(5)).await;
 
-        let commands = log.lock().await;
-        let has_move = commands
-            .iter()
-            .any(|c| c.contains("movetoworkspacesilent 3,address:0xabc123"));
-        assert!(
-            has_move,
-            "expected movetoworkspacesilent dispatch, got: {commands:?}"
-        );
-
-        let has_rule_disable = commands
-            .iter()
-            .any(|c| c.contains("windowrule[hyprresume-slow-app]:enable false"));
-        assert!(has_rule_disable, "expected rule cleanup, got: {commands:?}");
-        drop(commands);
-
-        s1.abort();
+        // sessionctl handles placement — watcher just logs and exits
         s2.abort();
     }
 
     /// Verifies that when a pending window never appears, the watcher
-    /// times out after the grace period and still cleans up all rules.
+    /// times out after the grace period.
     #[tokio::test]
-    async fn late_watcher_times_out_and_disables_rules() {
+    async fn late_watcher_times_out() {
         let dir = tempfile::tempdir().unwrap();
         let sock1 = dir.path().join("s1.sock");
         let sock2 = dir.path().join("s2.sock");
-
-        let (mock1, log) = RecordingSocket1::new(&sock1);
-        let s1 = tokio::spawn(mock1.serve());
 
         let s2 = spawn_delayed_socket2(
             &sock2,
@@ -1441,19 +1119,10 @@ mod tests {
         );
 
         let paths = HyprSocketPaths::new(sock1, sock2);
-        let pending = vec![PendingWindow {
-            app_id: "missing-app".to_string(),
-            workspace: "2".to_string(),
-            floating: false,
-            fullscreen: false,
-            position: None,
-            size: None,
-            rule_name: "hyprresume-missing-app".to_string(),
-        }];
-        let all_rules = vec!["hyprresume-missing-app".to_string()];
+        let pending = vec!["missing-app".to_string()];
 
         let start = tokio::time::Instant::now();
-        watch_late_windows(paths, pending, all_rules, false, Duration::from_millis(300)).await;
+        watch_late_windows(paths, pending, Duration::from_millis(300)).await;
         let elapsed = start.elapsed();
 
         assert!(
@@ -1461,82 +1130,6 @@ mod tests {
             "should wait for grace period, only waited {elapsed:?}"
         );
 
-        let commands = log.lock().await;
-        let has_rule_disable = commands
-            .iter()
-            .any(|c| c.contains("windowrule[hyprresume-missing-app]:enable false"));
-        assert!(
-            has_rule_disable,
-            "rules must be cleaned up even on timeout, got: {commands:?}"
-        );
-
-        let has_move = commands.iter().any(|c| c.contains("movetoworkspacesilent"));
-        assert!(
-            !has_move,
-            "no movetoworkspacesilent for a window that never appeared, got: {commands:?}"
-        );
-        drop(commands);
-
-        s1.abort();
-        s2.abort();
-    }
-
-    /// Floating window geometry (position + size) is applied when a late
-    /// window arrives and `restore_geometry` is enabled.
-    #[tokio::test]
-    async fn late_watcher_restores_floating_geometry() {
-        let dir = tempfile::tempdir().unwrap();
-        let sock1 = dir.path().join("s1.sock");
-        let sock2 = dir.path().join("s2.sock");
-
-        let (mock1, log) = RecordingSocket1::new(&sock1);
-        let s1 = tokio::spawn(mock1.serve());
-
-        let s2 = spawn_delayed_socket2(
-            &sock2,
-            vec![(
-                Duration::from_millis(50),
-                "openwindow>>flt001,9,floater,Floating App".to_string(),
-            )],
-        );
-
-        let paths = HyprSocketPaths::new(sock1, sock2);
-        let pending = vec![PendingWindow {
-            app_id: "floater".to_string(),
-            workspace: "5".to_string(),
-            floating: true,
-            fullscreen: false,
-            position: Some((200, 150)),
-            size: Some((800, 600)),
-            rule_name: "hyprresume-floater".to_string(),
-        }];
-        let all_rules = vec!["hyprresume-floater".to_string()];
-
-        watch_late_windows(paths, pending, all_rules, true, Duration::from_secs(5)).await;
-
-        let commands = log.lock().await;
-        let has_move = commands
-            .iter()
-            .any(|c| c.contains("movetoworkspacesilent 5,address:0xflt001"));
-        assert!(has_move, "expected workspace move, got: {commands:?}");
-
-        let has_float = commands
-            .iter()
-            .any(|c| c.contains("setfloating address:0xflt001"));
-        assert!(has_float, "expected setfloating, got: {commands:?}");
-
-        let has_resize = commands
-            .iter()
-            .any(|c| c.contains("resizewindowpixel exact 800 600,address:0xflt001"));
-        assert!(has_resize, "expected resize, got: {commands:?}");
-
-        let has_pos = commands
-            .iter()
-            .any(|c| c.contains("movewindowpixel exact 200 150,address:0xflt001"));
-        assert!(has_pos, "expected position, got: {commands:?}");
-        drop(commands);
-
-        s1.abort();
         s2.abort();
     }
 
@@ -1547,9 +1140,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock1 = dir.path().join("s1.sock");
         let sock2 = dir.path().join("s2.sock");
-
-        let (mock1, log) = RecordingSocket1::new(&sock1);
-        let s1 = tokio::spawn(mock1.serve());
 
         let s2 = spawn_delayed_socket2(
             &sock2,
@@ -1566,33 +1156,10 @@ mod tests {
         );
 
         let paths = HyprSocketPaths::new(sock1, sock2);
-        let pending = vec![
-            PendingWindow {
-                app_id: "app-a".to_string(),
-                workspace: "1".to_string(),
-                floating: false,
-                fullscreen: false,
-                position: None,
-                size: None,
-                rule_name: "hyprresume-app-a".to_string(),
-            },
-            PendingWindow {
-                app_id: "app-b".to_string(),
-                workspace: "4".to_string(),
-                floating: false,
-                fullscreen: false,
-                position: None,
-                size: None,
-                rule_name: "hyprresume-app-b".to_string(),
-            },
-        ];
-        let all_rules = vec![
-            "hyprresume-app-a".to_string(),
-            "hyprresume-app-b".to_string(),
-        ];
+        let pending = vec!["app-a".to_string(), "app-b".to_string()];
 
         let start = tokio::time::Instant::now();
-        watch_late_windows(paths, pending, all_rules, false, Duration::from_secs(10)).await;
+        watch_late_windows(paths, pending, Duration::from_secs(10)).await;
         let elapsed = start.elapsed();
 
         assert!(
@@ -1600,19 +1167,6 @@ mod tests {
             "should exit early when all pending resolved, took {elapsed:?}"
         );
 
-        let commands = log.lock().await;
-        let has_move_a = commands
-            .iter()
-            .any(|c| c.contains("movetoworkspacesilent 1,address:0xaaa"));
-        assert!(has_move_a, "expected move for app-a, got: {commands:?}");
-
-        let has_move_b = commands
-            .iter()
-            .any(|c| c.contains("movetoworkspacesilent 4,address:0xbbb"));
-        assert!(has_move_b, "expected move for app-b, got: {commands:?}");
-        drop(commands);
-
-        s1.abort();
         s2.abort();
     }
 }

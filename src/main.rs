@@ -59,6 +59,21 @@ enum Command {
     },
     /// Show current daemon status
     Status,
+    /// Manage the Hyprland sessionctl plugin
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// Install and load the plugin into Hyprland
+    Install,
+    /// Unload and remove the plugin
+    Uninstall,
+    /// Check if the plugin is loaded
+    Status,
 }
 
 fn init_logging(verbose: u8, quiet: bool) {
@@ -121,6 +136,10 @@ async fn main() -> Result<()> {
         Some(Command::Status) => {
             cmd_status(&cfg).await?;
         }
+
+        Some(Command::Plugin { action }) => {
+            cmd_plugin(action).await?;
+        }
     }
 
     Ok(())
@@ -175,8 +194,7 @@ async fn cmd_restore(cfg: &config::Config, name: Option<&str>) -> Result<()> {
     }
 
     let session = snapshot.load(name)?;
-    let engine =
-        core::restore::RestoreEngine::new(cfg.general.restore_geometry, cfg.general.restore_layout);
+    let engine = core::restore::RestoreEngine::new(cfg.general.restore_layout);
     let (report, watcher) = engine.restore(&session, &ctl).await?;
 
     println!(
@@ -239,6 +257,94 @@ async fn cmd_resolve(cfg: &config::Config, class: &str) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn plugin_dir() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share"))
+        .join("hyprresume")
+}
+
+fn plugin_path() -> std::path::PathBuf {
+    plugin_dir().join("hyprland-sessionctl.so")
+}
+
+/// Locate the built plugin .so next to the current binary or in the
+/// cargo target directory (dev builds).
+fn find_bundled_plugin() -> Option<std::path::PathBuf> {
+    let candidates = [
+        // next to the hyprresume binary (installed via `make install`)
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("libhyprresume_plugin.so"))),
+        // common build output paths
+        std::env::current_exe().ok().and_then(|p| {
+            p.parent()
+                .and_then(std::path::Path::parent)
+                .map(|d| d.join("libhyprresume_plugin.so"))
+        }),
+    ];
+    candidates.into_iter().flatten().find(|p| p.exists())
+}
+
+async fn cmd_plugin(action: PluginAction) -> Result<()> {
+    match action {
+        PluginAction::Install => {
+            let dest = plugin_path();
+            let src = find_bundled_plugin().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "plugin .so not found. build it first:\n  \
+                     HYPRLAND_SOURCE=<path> cargo build -p hyprresume-plugin --release"
+                )
+            })?;
+
+            std::fs::create_dir_all(plugin_dir())?;
+            std::fs::copy(&src, &dest)?;
+            println!("Installed plugin to {}", dest.display());
+
+            let ctl = ipc::client::HyprCtl::from_env()?;
+            let resp = ctl.plugin_load(&dest).await?;
+            if resp.contains("ok") {
+                println!("Plugin loaded.");
+            } else {
+                bail!("failed to load plugin: {resp}");
+            }
+            Ok(())
+        }
+
+        PluginAction::Uninstall => {
+            let dest = plugin_path();
+            if let Ok(ctl) = ipc::client::HyprCtl::from_env() {
+                drop(ctl.plugin_unload(&dest).await);
+            }
+            if dest.exists() {
+                std::fs::remove_file(&dest)?;
+                println!("Plugin removed.");
+            } else {
+                println!("Plugin not installed.");
+            }
+            Ok(())
+        }
+
+        PluginAction::Status => {
+            let ctl = ipc::client::HyprCtl::from_env()?;
+            let resp = ctl.plugin_list().await?;
+            if resp.contains("hyprland-sessionctl") {
+                println!("Plugin is loaded.");
+                let status = ctl.sessionctl_status().await?;
+                print!("{status}");
+            } else {
+                println!("Plugin is not loaded.");
+                if plugin_path().exists() {
+                    println!("  Installed at: {}", plugin_path().display());
+                    println!("  Run `hyprresume plugin install` to load it.");
+                } else {
+                    println!("  Run `hyprresume plugin install` to install and load it.");
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn cmd_status(cfg: &config::Config) -> Result<()> {
