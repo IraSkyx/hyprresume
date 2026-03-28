@@ -106,7 +106,7 @@ impl StateManager {
 
     /// Synchronise internal state with a fresh `j/clients` snapshot.
     /// - Adds windows that exist in Hyprland but are missing from state
-    ///   (e.g. if an OpenWindow event was lost).
+    ///   (e.g. if an `OpenWindow` event was lost).
     /// - Removes windows from state that no longer exist in Hyprland.
     /// - Updates geometry, workspace, monitor, floating and fullscreen for
     ///   every tracked window.
@@ -219,7 +219,6 @@ mod tests {
                 save_interval: 60,
                 session_dir: "/tmp/hyprresume-test".into(),
                 restore_on_start: false,
-                restore_geometry: false,
                 restore_layout: true,
             },
             rules: RulesConfig {

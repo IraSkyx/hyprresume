@@ -36,10 +36,7 @@ pub async fn run(config: Config) -> Result<()> {
         tracing::info!("restoring previous session...");
         match snapshot.load("last") {
             Ok(session) => {
-                let engine = RestoreEngine::new(
-                    config.general.restore_geometry,
-                    config.general.restore_layout,
-                );
+                let engine = RestoreEngine::new(config.general.restore_layout);
                 let (report, _watcher) = engine.restore(&session, &ctl).await?;
                 if report.failed > 0 {
                     for (app, err) in &report.errors {
