@@ -1,0 +1,4 @@
+CompileFlags:
+  Add:
+    - -I.clangd-include
+    - -std=c++26

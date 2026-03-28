@@ -1,0 +1,9 @@
+[repository]
+name = "hyprresume"
+authors = ["skyx"]
+commit_pins = []
+
+[hyprland-sessionctl]
+description = "Session restore plugin for hyprresume"
+output = "target/release/libhyprresume_plugin.so"
+build = ["cargo build -p hyprresume-plugin --release"]

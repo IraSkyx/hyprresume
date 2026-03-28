@@ -1,0 +1,13 @@
+[package]
+name = "hyprresume-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "Hyprland plugin for hyprresume session restore (sessionctl)"
+license = "BSD-3-Clause"
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"

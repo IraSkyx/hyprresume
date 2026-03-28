@@ -8,6 +8,9 @@ repository = "https://github.com/IraSkyx/hyprresume"
 keywords = ["hyprland", "wayland", "session", "resume"]
 categories = ["command-line-utilities"]
 
+[workspace]
+members = [".", "plugin"]
+
 [dependencies]
 tokio = { version = "1.49", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

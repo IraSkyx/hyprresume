@@ -1,0 +1,10 @@
+{
+    global:
+        pluginAPIVersion;
+        pluginInit;
+        pluginExit;
+        rust_plugin_init;
+        rust_plugin_exit;
+    local:
+        *;
+};
