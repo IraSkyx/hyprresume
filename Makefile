@@ -8,7 +8,7 @@ format:
 
 .PHONY: lint
 lint:
-	cargo clippy --all-targets -- -Dclippy::suspicious -Dclippy::style -Dclippy::nursery -Dclippy::pedantic -Dclippy::all \
+	cargo clippy --workspace --all-targets -- -Dclippy::suspicious -Dclippy::style -Dclippy::nursery -Dclippy::pedantic -Dclippy::all \
 	    -Dwarnings -Dlet_underscore_drop
 
 .PHONY: test

@@ -1,0 +1,47 @@
+# Maintainer: skyx
+# Hyprland with the preMap event patch required by hyprresume's plugin.
+# Drop-in replacement for the official hyprland package.
+
+pkgname=hyprland-premap
+pkgver=0.54.3
+pkgrel=1
+pkgdesc="Hyprland with window.preMap event for plugin-driven placement"
+arch=('x86_64')
+url="https://github.com/IraSkyx/Hyprland"
+license=('BSD-3-Clause')
+provides=('hyprland')
+conflicts=('hyprland' 'hyprland-git')
+depends=(
+    aquamarine cairo gcc-libs glib2 glibc glslang hyprcursor hyprgraphics
+    hyprland-guiutils hyprlang hyprutils hyprwayland-scanner hyprwire
+    libdisplay-info libdrm libglvnd libinput libliftoff libx11 libxcb
+    libxcomposite libxcursor libxfixes libxkbcommon libxrender mesa muparser
+    opengl-driver pango pixman re2 seatd systemd-libs tomlplusplus
+    util-linux-libs wayland wayland-protocols xcb-proto xcb-util
+    xcb-util-errors xcb-util-image xcb-util-keysyms xcb-util-renderutil
+    xcb-util-wm xorg-xwayland
+)
+makedepends=('cmake' 'git' 'ninja')
+source=("git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd Hyprland
+    git describe --tags --long | sed 's/^v//;s/-/.r/;s/-/./'
+}
+
+build() {
+    cd Hyprland
+    git submodule update --init --recursive
+    cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DNO_HYPRPM=OFF
+    cmake --build build
+}
+
+package() {
+    cd Hyprland
+    DESTDIR="$pkgdir" cmake --install build
+    install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+}

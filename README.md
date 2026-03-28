@@ -6,40 +6,57 @@ Session persistence for [Hyprland](https://hyprland.org). Saves your open applic
 - Saves sessions as human-readable TOML
 - Restores apps to their original workspaces with floating window geometry
 - Reconstructs tiling layouts from saved window positions (dwindle and master layouts)
+- Ships a Hyprland plugin for compositor-level window placement
 
 ## Install
 
-**Arch Linux (AUR):**
+### 1. Patched Hyprland
+
+The plugin needs a small patch to Hyprland (a `window.preMap` event, [10-line diff](https://github.com/IraSkyx/Hyprland/commit/main)). Until this lands upstream, install Hyprland from the fork. This replaces your system Hyprland package.
+
+**Arch Linux:**
 
 ```sh
-paru -S hyprresume    # or yay, etc.
+cd pkg && makepkg -si -p PKGBUILD-hyprland
+# reboot to run the patched compositor
 ```
 
-**From source:**
+**Other distros:** build [IraSkyx/Hyprland](https://github.com/IraSkyx/Hyprland) from source following the [Hyprland wiki](https://wiki.hyprland.org/Getting-Started/Installation/).
+
+### 2. hyprresume + plugin
+
+After rebooting into the patched Hyprland:
 
 ```sh
-cargo install --path .
+paru -S hyprresume              # AUR, or: cargo install --path .
+hyprpm update --hl-url https://github.com/IraSkyx/Hyprland
+hyprpm add https://github.com/IraSkyx/hyprresume
+hyprpm enable hyprland-sessionctl
 ```
 
-## Usage
+> `--hl-url` is needed because hyprpm fetches headers from upstream Hyprland by default, which doesn't have the `preMap` event yet. This flag will no longer be needed once the patch lands upstream. Use the same flag on subsequent `hyprpm update` calls after Hyprland updates.
 
-Add to your `hyprland.conf`:
+### 3. Configuration
+
+Add to `hyprland.conf`:
 
 ```conf
 exec-once = hyprresume
 ```
 
-This starts the daemon, which restores your previous session, tracks window changes and saves periodically. It also saves on logout/shutdown via SIGTERM.
+The plugin loads automatically via hyprpm. The daemon saves sessions periodically and restores on startup.
 
-### Commands
+## Usage
 
 ```sh
-hyprresume save [name]      # snapshot current session
-hyprresume restore [name]   # restore a saved session
-hyprresume list             # list saved sessions
-hyprresume delete <name>    # delete a session
-hyprresume resolve <class>  # show what command a window class maps to
-hyprresume status           # show daemon/session info
+hyprresume                      # start daemon (auto-restore + periodic save)
+hyprresume save [name]          # snapshot current session
+hyprresume restore [name]       # restore a saved session
+hyprresume list                 # list saved sessions
+hyprresume delete <name>        # delete a session
+hyprresume resolve <class>      # show what command a window class maps to
+hyprresume status               # show daemon/session info
+hyprresume plugin status        # check if the Hyprland plugin is loaded
 ```
 
 Use `-v` for info logs, `-vv` for debug, `-vvv` for trace.
@@ -53,7 +70,6 @@ Place a config file at `~/.config/hypr/hyprresume.toml`. All fields are optional
 save_interval = 120           # seconds between auto-saves
 session_dir = "~/.local/share/hyprresume"
 restore_on_start = true
-restore_geometry = true       # restore floating window position/size
 restore_layout = true         # reconstruct tiling layout (dwindle + master)
 
 [rules]
@@ -95,12 +111,10 @@ git clone https://github.com/IraSkyx/hyprresume.git
 cd hyprresume
 ```
 
-Build and test:
-
 ```sh
 make build      # dev build
 make test       # run all tests
-make lint       # clippy (pedantic)
+make lint       # clippy (workspace-wide)
 make format     # rustfmt
 ```
 
