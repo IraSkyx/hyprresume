@@ -7,6 +7,19 @@ use tokio::net::UnixStream;
 
 use crate::models::{HyprClient, HyprMonitor};
 
+pub struct SessionctlExpectation<'a> {
+    pub app_id: &'a str,
+    pub workspace: &'a str,
+    pub monitor: &'a str,
+    pub floating: bool,
+    pub fullscreen: bool,
+    pub maximized: bool,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
 /// Resolved Hyprland socket paths for a running instance.
 #[derive(Debug, Clone)]
 pub struct HyprSocketPaths {
@@ -120,5 +133,75 @@ impl HyprCtl {
     /// Query the active tiling layout (e.g. "dwindle", "master").
     pub async fn get_layout(&self) -> Result<String> {
         self.get_option_str("general:layout").await
+    }
+
+    // sessionctl IPC
+
+    /// Begin an IPC-driven session restore. Clears any previous expectations.
+    pub async fn sessionctl_begin(&self) -> Result<bool> {
+        let resp = self.plain("sessionctl begin").await?;
+        Ok(resp.trim() == "ok")
+    }
+
+    /// Register an expected window for compositor-side auto-restore.
+    /// The compositor will apply this state when a window with the given
+    /// `app_id` maps, without requiring the app to support the protocol.
+    pub async fn sessionctl_expect(&self, exp: &SessionctlExpectation<'_>) -> Result<bool> {
+        let cmd = format!(
+            "sessionctl expect {} {} {} {} {} {} {} {} {} {}",
+            exp.app_id,
+            exp.workspace,
+            exp.monitor,
+            u8::from(exp.floating),
+            u8::from(exp.fullscreen),
+            u8::from(exp.maximized),
+            exp.x,
+            exp.y,
+            exp.w,
+            exp.h,
+        );
+        let resp = self.plain(&cmd).await?;
+        Ok(resp.trim() == "ok")
+    }
+
+    /// Finalize the expectation registration.
+    pub async fn sessionctl_end(&self) -> Result<bool> {
+        let resp = self.plain("sessionctl end").await?;
+        Ok(resp.trim() == "ok")
+    }
+
+    /// Signal that the restore is fully complete (including late windows).
+    /// Clears all remaining expectations so new windows of the same class
+    /// are no longer auto-placed.
+    pub async fn sessionctl_finish(&self) -> Result<bool> {
+        let resp = self.plain("sessionctl finish").await?;
+        Ok(resp.trim() == "ok")
+    }
+
+    /// Check if the compositor supports sessionctl.
+    pub async fn sessionctl_available(&self) -> bool {
+        self.plain("sessionctl status")
+            .await
+            .map(|r| !r.contains("error") && !r.contains("unknown"))
+            .unwrap_or(false)
+    }
+
+    // plugin management
+
+    pub async fn plugin_load(&self, path: &std::path::Path) -> Result<String> {
+        self.plain(&format!("plugin load {}", path.display())).await
+    }
+
+    pub async fn plugin_unload(&self, path: &std::path::Path) -> Result<String> {
+        self.plain(&format!("plugin unload {}", path.display()))
+            .await
+    }
+
+    pub async fn plugin_list(&self) -> Result<String> {
+        self.plain("plugin list").await
+    }
+
+    pub async fn sessionctl_status(&self) -> Result<String> {
+        self.plain("sessionctl status").await
     }
 }
