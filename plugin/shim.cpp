@@ -54,38 +54,51 @@ void shim_cleanup() {
 }
 
 const char* shim_window_class(void* w) {
+    if (!w)
+        return "";
     auto* win = static_cast<Desktop::View::CWindow*>(w);
     auto& cls = win->m_class.empty() ? win->m_initialClass : win->m_class;
     return cls.c_str();
 }
 
 void shim_window_set_workspace(void* w, const char* ws) {
-    auto* win = static_cast<Desktop::View::CWindow*>(w);
-    win->m_preMapRequestedWorkspace = std::string(ws) + " silent";
+    if (!w || !ws || !ws[0])
+        return;
+    static_cast<Desktop::View::CWindow*>(w)->m_preMapRequestedWorkspace = std::string(ws) + " silent";
 }
 
 void shim_window_set_monitor(void* w, const char* name) {
+    if (!w || !name || !name[0] || !g_pCompositor)
+        return;
     auto mon = g_pCompositor->getMonitorFromName(name);
     if (mon)
         static_cast<Desktop::View::CWindow*>(w)->m_monitor = mon;
 }
 
 void shim_window_set_floating(void* w) {
+    if (!w)
+        return;
     auto* win = static_cast<Desktop::View::CWindow*>(w);
     win->m_isFloating    = true;
     win->m_requestsFloat = true;
 }
 
 void shim_window_set_fullscreen(void* w) {
+    if (!w)
+        return;
     static_cast<Desktop::View::CWindow*>(w)->m_wantsInitialFullscreen = true;
 }
 
 void shim_window_set_geometry(void* w, double x, double y, double gw, double gh) {
+    if (!w)
+        return;
     auto* win = static_cast<Desktop::View::CWindow*>(w);
     win->m_position = Vector2D(x, y);
     win->m_size     = Vector2D(gw, gh);
-    win->m_realPosition->setValueAndWarp(win->m_position);
-    win->m_realSize->setValueAndWarp(win->m_size);
+    if (win->m_realPosition)
+        win->m_realPosition->setValueAndWarp(win->m_position);
+    if (win->m_realSize)
+        win->m_realSize->setValueAndWarp(win->m_size);
 }
 
 } // extern "C"
